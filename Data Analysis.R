@@ -584,6 +584,373 @@ for (class_idx in 1:length(birth_items_raw$target_classes)) {
   message(sprintf("      %-15s | %15.4f | %16.4f | %10.4f", class_val, m_mean, s_mean, m_mean - s_mean))
 }
 
+# ============================================================================
+# HEATMAP GENERATION: Predictor × Settlement Category
+# ============================================================================
+# Metrics: Standardized coefficients from multinomial logistic regression
+# Interpretation: Strength and direction of association between predictor and class
+#
+# For ITEMS: We'll count how many times each item appears in "top predictors" 
+# (high |coefficient|) across classes and analyses. Items appearing >X times 
+# appear in main text; all items go to supplementary material.
+#
+# Threshold X can be adjusted based on results; recommended starting point: X=3
+
+# Function to extract coefficients and create heatmap data
+extract_heatmap_data <- function(model_object, pred_cols, label, data) {
+  message(paste0("\nExtracting heatmap data for: ", label))
+  
+  # Recreate the task and train final model on full data to get stable coefficients
+  task_data <- data %>%
+    select(all_of(c(pred_cols, names(model_object$all_fold_results[[1]]$true_outcomes)))) %>%
+    rename(target = all_of(names(model_object$all_fold_results[[1]]$true_outcomes)))
+  
+  # For coefficient extraction, we need to train on full data
+  # (This gives us the final model structure for visualization purposes)
+  task_full <- as_task_classif(
+    data %>% select(all_of(c(pred_cols, model_object$target_classes[[1]]))),
+    target = model_object$target_classes[[1]],
+    id = label
+  )
+  
+  # Get the target outcome variable name from the analysis
+  outcome_name <- setdiff(colnames(data), pred_cols)[1]  # First non-predictor column
+  
+  task_full <- as_task_classif(
+    data %>% select(all_of(c(pred_cols, outcome_name))),
+    target = outcome_name,
+    id = label
+  )
+  
+  graph <- po("imputemean") %>>% 
+    po("imputeoor") %>>%
+    po("encode", method = "treatment") %>>%
+    lrn("classif.multinom", predict_type = "prob")
+  
+  learner <- as_learner(graph)
+  learner$train(task_full)
+  
+  # Extract coefficients
+  # The underlying model is in learner$model[[2]]$model (after pipeline steps)
+  multinom_model <- learner$model
+  
+  # Get weights from nnet::multinom object
+  # For multinom with K classes, coefficients matrix is (K-1) × (p+1) 
+  # (K-1 because reference class has 0 coefficients)
+  tryCatch({
+    coef_matrix <- coef(multinom_model)
+    
+    # multinom returns (n_classes-1) × (n_predictors+1)
+    # Remove intercept column
+    coef_matrix <- coef_matrix[, -1, drop = FALSE]
+    
+    # Add reference class with zeros
+    ref_row <- rep(0, ncol(coef_matrix))
+    coef_matrix <- rbind(coef_matrix, ref_row)
+    
+    # Get class names in order (match target_classes order)
+    class_names <- model_object$target_classes
+    rownames(coef_matrix) <- class_names
+    
+    return(list(
+      coefficients = coef_matrix,
+      predictor_names = pred_cols,
+      class_names = class_names,
+      label = label
+    ))
+  }, error = function(e) {
+    message(paste0("  WARNING: Could not extract coefficients - ", e$message))
+    return(NULL)
+  })
+}
+
+# Function to standardize coefficients (for comparability across models)
+standardize_coefficients <- function(coef_matrix) {
+  # Standardize each predictor (column) to have mean 0, SD 1 across classes
+  coef_std <- apply(coef_matrix, 2, function(col) {
+    m <- mean(col)
+    s <- sd(col)
+    if (s == 0) return(col - m)
+    return((col - m) / s)
+  })
+  return(coef_std)
+}
+
+# Function to count predictor frequency in top predictors
+count_top_predictors <- function(coef_matrix, abs_threshold) {
+  # For each predictor, count how many classes have |coef| > threshold
+  top_counts <- colSums(abs(coef_matrix) > abs_threshold)
+  return(top_counts)
+}
+
+# ============================================================================
+# GENERATE HEATMAPS: RESIDUALIZED MODELS ONLY
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("GENERATING HEATMAP DATA: Residualized Models (Age/Gender controlled)")
+message(strrep("=", 90))
+
+# CORRELATION-BASED HEATMAP APPROACH (more robust):
+# Calculate point-biserial correlation between each predictor and each class indicator
+
+generate_correlation_heatmap <- function(model_object, pred_cols, outcome_var, data) {
+  # Get all predictions and outcomes from model
+  all_pred <- model_object$all_pred_probs
+  all_true <- model_object$all_true_outcomes
+  class_names <- model_object$target_classes
+  
+  # Create heatmap data: correlation between each predictor and class probability
+  n_predictors <- length(pred_cols)
+  n_classes <- length(class_names)
+  
+  heatmap_data <- matrix(NA, nrow = n_predictors, ncol = n_classes)
+  rownames(heatmap_data) <- pred_cols
+  colnames(heatmap_data) <- class_names
+  
+  # Get original predictor values from data
+  data_pred <- data %>% select(all_of(pred_cols)) %>% 
+    mutate(across(everything(), ~scale(., center = TRUE, scale = TRUE)[,1]))
+  
+  # Calculate correlation between predictors and predicted probabilities for each class
+  for (class_idx in 1:n_classes) {
+    class_name <- class_names[class_idx]
+    class_prob <- all_pred[, class_idx]
+    
+    # For each predictor, calculate correlation with class probability
+    for (pred_idx in 1:n_predictors) {
+      pred_name <- pred_cols[pred_idx]
+      pred_values <- data_pred[[pred_name]]
+      
+      # Correlation (Pearson)
+      corr <- cor(pred_values, class_prob, use = "complete.obs")
+      heatmap_data[pred_idx, class_idx] <- corr
+    }
+  }
+  
+  return(heatmap_data)
+}
+
+# Generate heatmaps for current residence (items - residualized)
+message("\n--- Current Residence (Items - RESIDUALIZED) ---")
+hm_current_items_resid <- generate_correlation_heatmap(
+  model_object = current_items_resid,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "currentResidenceType2",
+  data = data
+)
+
+# Count how many classes each item shows strong correlation with (|r| > 0.10)
+item_freq_current_items_resid <- colSums(abs(hm_current_items_resid) > 0.10)
+message(paste0("  Items with |correlation| > 0.10 in: ", 
+               sum(item_freq_current_items_resid >= 1), " items"))
+message(paste0("  Items appearing in 3+ classes: ", 
+               sum(item_freq_current_items_resid >= 3), " items"))
+
+# Save full heatmap data to RDS (supplementary material)
+saveRDS(list(
+  heatmap = hm_current_items_resid,
+  predictor_names = colnames(data)[30:217],
+  class_names = current_items_resid$target_classes,
+  label = "current_residence_items_residualized"
+), file = "heatmap_current_items_resid_full.rds")
+
+# Filter items for main text (appearing in 3+ classes with |r| > 0.10)
+main_text_threshold <- 3
+items_for_main_current_resid <- which(item_freq_current_items_resid >= main_text_threshold)
+hm_current_items_resid_filtered <- hm_current_items_resid[, items_for_main_current_resid, drop = FALSE]
+
+message(paste0("  Main text (3+ classes): ", ncol(hm_current_items_resid_filtered), " items"))
+
+# Generate heatmaps for current residence (domains - residualized)
+message("\n--- Current Residence (Domains - RESIDUALIZED) ---")
+hm_current_domains_resid <- generate_correlation_heatmap(
+  model_object = current_domains_resid,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "currentResidenceType2",
+  data = data
+)
+message(paste0("  Domains: all ", ncol(hm_current_domains_resid), " included in main text"))
+
+# Generate heatmaps for birth residence (items - residualized)
+message("\n--- Birth Residence (Items - RESIDUALIZED) ---")
+hm_birth_items_resid <- generate_correlation_heatmap(
+  model_object = birth_items_resid,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "birthResidenceType",
+  data = data
+)
+
+item_freq_birth_items_resid <- colSums(abs(hm_birth_items_resid) > 0.10)
+message(paste0("  Items with |correlation| > 0.10 in: ", 
+               sum(item_freq_birth_items_resid >= 1), " items"))
+message(paste0("  Items appearing in 3+ classes: ", 
+               sum(item_freq_birth_items_resid >= 3), " items"))
+
+saveRDS(list(
+  heatmap = hm_birth_items_resid,
+  predictor_names = colnames(data)[30:217],
+  class_names = birth_items_resid$target_classes,
+  label = "birth_residence_items_residualized"
+), file = "heatmap_birth_items_resid_full.rds")
+
+items_for_main_birth_resid <- which(item_freq_birth_items_resid >= main_text_threshold)
+hm_birth_items_resid_filtered <- hm_birth_items_resid[, items_for_main_birth_resid, drop = FALSE]
+
+message(paste0("  Main text (3+ classes): ", ncol(hm_birth_items_resid_filtered), " items"))
+
+# Generate heatmaps for birth residence (domains - residualized)
+message("\n--- Birth Residence (Domains - RESIDUALIZED) ---")
+hm_birth_domains_resid <- generate_correlation_heatmap(
+  model_object = birth_domains_resid,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "birthResidenceType",
+  data = data
+)
+message(paste0("  Domains: all ", ncol(hm_birth_domains_resid), " included in main text"))
+
+# ============================================================================
+# VISUALIZATION: Create ggplot2-compatible heatmaps
+# ============================================================================
+
+library(reshape2)
+
+# Function to create ggplot2 heatmap
+create_heatmap_ggplot <- function(heatmap_data, title, filename = NULL, 
+                                   width = 10, height = 8) {
+  # Melt for ggplot2
+  hm_melted <- melt(heatmap_data)
+  colnames(hm_melted) <- c("Predictor", "Class", "Correlation")
+  
+  # Create heatmap
+  p <- ggplot(hm_melted, aes(x = Class, y = Predictor, fill = Correlation)) +
+    geom_tile(color = "white", size = 0.5) +
+    scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
+                         midpoint = 0, limits = c(-0.3, 0.3)) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 8),
+      legend.position = "right",
+      plot.title = element_text(hjust = 0.5, size = 12, face = "bold")
+    ) +
+    labs(title = title, x = "Settlement Category", y = "Predictor",
+         fill = "Correlation\n(Pearson r)")
+  
+  if (!is.null(filename)) {
+    ggsave(filename, plot = p, width = width, height = height, dpi = 300)
+    message(paste0("  Saved: ", filename))
+  }
+  
+  return(p)
+}
+
+# Create main text heatmaps (RESIDUALIZED ONLY)
+message("\n" %+% strrep("=", 90))
+message("CREATING PUBLICATION-READY HEATMAPS (RESIDUALIZED)")
+message(strrep("=", 90))
+
+message("\nMAIN TEXT FIGURES:")
+
+p1 <- create_heatmap_ggplot(
+  hm_current_domains_resid,
+  title = "Current Residence: Domain Predictors (Age/Gender Residualized)",
+  filename = "heatmap_current_domains_resid.png",
+  width = 6, height = 4
+)
+
+p2 <- create_heatmap_ggplot(
+  hm_birth_domains_resid,
+  title = "Birth Residence: Domain Predictors (Age/Gender Residualized)",
+  filename = "heatmap_birth_domains_resid.png",
+  width = 6, height = 4
+)
+
+p3 <- create_heatmap_ggplot(
+  hm_current_items_resid_filtered,
+  title = paste0("Current Residence: Top Item Predictors (n=", ncol(hm_current_items_resid_filtered), ", Age/Gender Residualized)"),
+  filename = "heatmap_current_items_resid.png",
+  width = 8, height = 10
+)
+
+p4 <- create_heatmap_ggplot(
+  hm_birth_items_resid_filtered,
+  title = paste0("Birth Residence: Top Item Predictors (n=", ncol(hm_birth_items_resid_filtered), ", Age/Gender Residualized)"),
+  filename = "heatmap_birth_items_resid.png",
+  width = 8, height = 10
+)
+
+message("\nSUPPLEMENTARY MATERIAL FIGURES:")
+
+p_sup1 <- create_heatmap_ggplot(
+  hm_current_items_resid,
+  title = paste0("Supplementary: Current Residence - All Item Predictors (n=", ncol(hm_current_items_resid), ", Age/Gender Residualized)"),
+  filename = "heatmap_current_items_resid_supplementary.png",
+  width = 12, height = 30
+)
+
+p_sup2 <- create_heatmap_ggplot(
+  hm_birth_items_resid,
+  title = paste0("Supplementary: Birth Residence - All Item Predictors (n=", ncol(hm_birth_items_resid), ", Age/Gender Residualized)"),
+  filename = "heatmap_birth_items_resid_supplementary.png",
+  width = 12, height = 30
+)
+
+message("\n" %+% strrep("=", 90))
+message("ITEM FILTERING SUMMARY (Threshold: |correlation| > 0.10 in 3+ classes)")
+message("RESIDUALIZED MODELS (Age/Gender Controlled)")
+message(strrep("=", 90))
+
+message("\nCurrent Residence Prediction:")
+message(sprintf("  Total items: %d", length(colnames(data)[30:217])))
+message(sprintf("  Items in main text (≥3 classes): %d (%.1f%%)", 
+                length(items_for_main_current_resid),
+                100 * length(items_for_main_current_resid) / 188))
+message(sprintf("  Items in supplementary only: %d", 
+                188 - length(items_for_main_current_resid)))
+
+message("\nBirth Residence Prediction:")
+message(sprintf("  Total items: %d", length(colnames(data)[30:217])))
+message(sprintf("  Items in main text (≥3 classes): %d (%.1f%%)", 
+                length(items_for_main_birth_resid),
+                100 * length(items_for_main_birth_resid) / 188))
+message(sprintf("  Items in supplementary only: %d", 
+                188 - length(items_for_main_birth_resid)))
+
+# ============================================================================
+# DETAILED ITEM REPORTING TABLE
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("TOP ITEMS FOR MAIN TEXT (RESIDUALIZED)")
+message(strrep("=", 90))
+
+# Create summary table for main text items
+items_list_current_resid <- colnames(data)[30:217][items_for_main_current_resid]
+items_list_birth_resid <- colnames(data)[30:217][items_for_main_birth_resid]
+
+message("\nCurrent Residence - Main Text Items (Age/Gender Residualized):")
+message("  Item Name | Village corr | Town corr | City corr | Abroad corr | Max |corr|")
+for (i in seq_along(items_list_current_resid)) {
+  item <- items_list_current_resid[i]
+  idx <- items_for_main_current_resid[i]
+  corr_vals <- hm_current_items_resid_filtered[, i]
+  max_corr <- max(abs(corr_vals))
+  message(sprintf("  %s | %12.4f | %9.4f | %9.4f | %11.4f | %8.4f",
+                  item, corr_vals[1], corr_vals[2], corr_vals[3], corr_vals[4], max_corr))
+}
+
+message("\nBirth Residence - Main Text Items (Age/Gender Residualized):")
+message("  Item Name | Village corr | Town corr | City corr | Abroad corr | Max |corr|")
+for (i in seq_along(items_list_birth_resid)) {
+  item <- items_list_birth_resid[i]
+  idx <- items_for_main_birth_resid[i]
+  corr_vals <- hm_birth_items_resid_filtered[, i]
+  max_corr <- max(abs(corr_vals))
+  message(sprintf("  %s | %12.4f | %9.4f | %9.4f | %11.4f | %8.4f",
+                  item, corr_vals[1], corr_vals[2], corr_vals[3], corr_vals[4], max_corr))
+}
+
 message("\n" %+% strrep("=", 90) %+% "\n")
 
 
