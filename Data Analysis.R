@@ -121,8 +121,11 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       drop_na(!!sym(outcome_var), gender, ageAtAgreement)
     
     # Residualize predictors within the analysis dataset
+    # Use na.action = na.exclude so residuals vector matches data dimensions
     for (col in pred_cols) {
-      residuals_vec <- residuals(lm(as.formula(paste(col, "~ gender + ageAtAgreement")), data = analysis_data))
+      residuals_vec <- residuals(lm(as.formula(paste(col, "~ gender + ageAtAgreement")), 
+                                     data = analysis_data, 
+                                     na.action = na.exclude))
       analysis_data[[col]] <- residuals_vec
     }
   } else {
