@@ -396,6 +396,174 @@ saveRDS(birth_domains_resid, file = "birth_domains_resid.rds")
 
 
 # ============================================================================
+# FEATURELESS BASELINE MODELS
+# ============================================================================
+# A featureless model predicts the base rate (class proportions) for all samples
+# BSS should be ~0 for a featureless model by definition
+
+message("\n" %+% strrep("=", 90))
+message("TRAINING FEATURELESS BASELINE MODELS")
+message(strrep("=", 90))
+
+featureless_baseline <- function(outcome_var, resampling, data_full) {
+  message(paste0("\n=== Running featureless baseline: ", outcome_var, " ==="))
+  
+  # Get outcome classes
+  target_classes <- sort(unique(data_full[[outcome_var]]))
+  
+  # Create task
+  task_data <- data_full %>%
+    select(all_of(outcome_var)) %>%
+    rename(target = !!sym(outcome_var))
+  
+  task <- as_task_classif(
+    task_data,
+    target = "target",
+    id = paste0("Featureless_", outcome_var)
+  )
+  
+  # Ensure stratification
+  task$col_roles$stratum <- "target"
+  
+  # Instantiate resampling
+  resampling$instantiate(task)
+  
+  all_fold_results <- list()
+  
+  for (i in 1:resampling$iters) {
+    if (i %% 5 == 0) message(paste0("  Completed fold ", i, " of ", resampling$iters))
+    
+    train_idx <- resampling$train_set(i)
+    test_idx <- resampling$test_set(i)
+    
+    task_train <- task$clone()$filter(train_idx)
+    task_test <- task$clone()$filter(test_idx)
+    
+    # Get true outcomes
+    true_outcomes <- task_test$data()$target
+    
+    # Compute base rates from TRAINING data
+    base_rates <- table(task_train$data()$target) / nrow(task_train$data())
+    base_rates <- as.numeric(base_rates[match(target_classes, names(base_rates))])
+    
+    # Create predicted probability matrix: all samples get base rate probabilities
+    n_test <- length(true_outcomes)
+    pred_probs <- matrix(rep(base_rates, each = n_test), nrow = n_test, ncol = length(target_classes))
+    colnames(pred_probs) <- target_classes
+    
+    # Calculate BSS for each class
+    bss_per_class <- sapply(target_classes, function(class) {
+      calculate_bss(true_outcomes, pred_probs[, class], class)
+    })
+    
+    # Store results
+    all_fold_results[[i]] <- list(
+      fold_id = i,
+      train_idx = train_idx,
+      test_idx = test_idx,
+      true_outcomes = true_outcomes,
+      pred_probs = pred_probs,
+      bss_per_class = bss_per_class,
+      mean_bss = mean(bss_per_class),
+      base_rates = base_rates
+    )
+  }
+  
+  # 6. Aggregate results
+  all_bss_values <- do.call(rbind, lapply(all_fold_results, function(x) x$bss_per_class))
+  mean_bss_per_class <- colMeans(all_bss_values)
+  overall_mean_bss <- mean(all_bss_values)
+  
+  # 7. Combine all predictions and outcomes
+  all_true <- unlist(lapply(all_fold_results, function(x) x$true_outcomes))
+  all_pred <- do.call(rbind, lapply(all_fold_results, function(x) x$pred_probs))
+  all_test_idx <- unlist(lapply(all_fold_results, function(x) x$test_idx))
+  
+  # 8. Identify movers/stayers from full dataset
+  is_mover <- data_full$currentResidenceType2[all_test_idx] != data_full$birthResidenceType[all_test_idx]
+  mover_mask <- is_mover
+  stayer_mask <- !is_mover
+  
+  # 9. Evaluate on subsets
+  bss_movers <- evaluate_on_subset(all_pred, all_true, mover_mask, target_classes)
+  bss_stayers <- evaluate_on_subset(all_pred, all_true, stayer_mask, target_classes)
+  
+  # 10. Compute fold-wise BSS for movers/stayers
+  bss_movers_per_fold <- matrix(NA, nrow = length(all_fold_results), ncol = length(target_classes))
+  bss_stayers_per_fold <- matrix(NA, nrow = length(all_fold_results), ncol = length(target_classes))
+  colnames(bss_movers_per_fold) <- target_classes
+  colnames(bss_stayers_per_fold) <- target_classes
+  
+  for (fold_idx in 1:length(all_fold_results)) {
+    fold_pred <- all_fold_results[[fold_idx]]$pred_probs
+    fold_true <- all_fold_results[[fold_idx]]$true_outcomes
+    fold_test_idx <- all_fold_results[[fold_idx]]$test_idx
+    
+    fold_is_mover <- data_full$currentResidenceType2[fold_test_idx] != data_full$birthResidenceType[fold_test_idx]
+    fold_mover_mask <- fold_is_mover
+    fold_stayer_mask <- !fold_is_mover
+    
+    for (class_idx in 1:length(target_classes)) {
+      class_val <- target_classes[class_idx]
+      
+      if (sum(fold_mover_mask) > 0) {
+        bss_movers_per_fold[fold_idx, class_idx] <- calculate_bss(
+          fold_true[fold_mover_mask],
+          fold_pred[fold_mover_mask, class_idx],
+          class_val
+        )
+      }
+      
+      if (sum(fold_stayer_mask) > 0) {
+        bss_stayers_per_fold[fold_idx, class_idx] <- calculate_bss(
+          fold_true[fold_stayer_mask],
+          fold_pred[fold_stayer_mask, class_idx],
+          class_val
+        )
+      }
+    }
+  }
+  
+  return(list(
+    label = paste0("Featureless_", outcome_var),
+    mean_bss_per_class = mean_bss_per_class,
+    overall_mean_bss = overall_mean_bss,
+    all_bss_values = all_bss_values,
+    bss_movers = bss_movers,
+    bss_stayers = bss_stayers,
+    bss_movers_per_fold = bss_movers_per_fold,
+    bss_stayers_per_fold = bss_stayers_per_fold,
+    all_fold_results = all_fold_results,
+    target_classes = target_classes,
+    all_pred_probs = all_pred,
+    all_true_outcomes = all_true,
+    mover_mask = mover_mask,
+    stayer_mask = stayer_mask,
+    resampling = resampling
+  ))
+}
+
+# Train featureless baselines
+featureless_current <- featureless_baseline(
+  outcome_var = "currentResidenceType2",
+  resampling = shared_resampling,
+  data_full = data
+)
+saveRDS(featureless_current, file = "featureless_current.rds")
+
+featureless_birth <- featureless_baseline(
+  outcome_var = "birthResidenceType",
+  resampling = shared_resampling,
+  data_full = data
+)
+saveRDS(featureless_birth, file = "featureless_birth.rds")
+
+message("\nFeatureless Baseline BSS Summary:")
+message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
+message(sprintf("  Birth Residence: Overall BSS = %.4f", featureless_birth$overall_mean_bss))
+
+
+# ============================================================================
 # SIGNIFICANCE TESTING (Nadeau & Bengio, 2003)
 # ============================================================================
 # Note: All models use identical folds (shared_resampling), so comparisons are valid.
@@ -993,8 +1161,9 @@ compute_ci_bss <- function(bss_per_fold_matrix) {
 # Prepare data for histogram: BSS by model, settlement type, mover/stayer
 histogram_data <- data.frame()
 
-# For residualized models (primary analysis)
+# For residualized models (primary analysis) + featureless baseline
 models_to_plot <- list(
+  list(name = "Featureless", current = featureless_current, birth = featureless_birth),
   list(name = "Domains", current = current_domains_resid, birth = birth_domains_resid),
   list(name = "Items", current = current_items_resid, birth = birth_items_resid)
 )
@@ -1084,19 +1253,47 @@ p_histogram <- ggplot(histogram_data, aes(x = Settlement, y = Mean_BSS,
                                 "Current.Stayer" = "Current - Stayer",
                                 "Birth.Mover" = "Birth - Mover",
                                 "Birth.Stayer" = "Birth - Stayer")) +
-  labs(title = "Model Predictive Ability by Settlement Type\n(Brier Skill Score with 95% CI, Age/Gender Residualized)",
+  labs(title = "Model Predictive Ability by Settlement Type\n(Brier Skill Score with 95% CI, Including Featureless Baseline)",
        x = "Settlement Type", y = "Brier Skill Score (BSS)", fill = "Model Type", color = "Model Type") +
   theme_minimal() +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     legend.position = "bottom",
-    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 11, face = "bold"),
     strip.text = element_text(face = "bold")
   ) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray", size = 0.5)
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.3) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red", size = 0.5, alpha = 0.5) +
+  annotate("text", x = Inf, y = 0.5, label = "BSS = 0.5 threshold", hjust = 1.1, vjust = -0.5, size = 3, color = "red")
 
-ggsave("histogram_model_performance.png", plot = p_histogram, width = 12, height = 6, dpi = 300)
+ggsave("histogram_model_performance.png", plot = p_histogram, width = 14, height = 6, dpi = 300)
 message("  Saved: histogram_model_performance.png")
+
+# Summary: Featureless baseline vs personality models
+message("\n" %+% strrep("=", 90))
+message("COMPARISON: Featureless Baseline vs Personality Models")
+message(strrep("=", 90))
+
+message("\nFeatureless Baseline (Expected BSS ≈ 0.00):")
+message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
+message(sprintf("  Birth Residence: Overall BSS = %.4f", featureless_birth$overall_mean_bss))
+
+message("\nPersonality Models Improvement over Baseline:")
+message("\nDomains (Age/Gender Residualized):")
+message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                current_domains_resid$overall_mean_bss,
+                current_domains_resid$overall_mean_bss - featureless_current$overall_mean_bss))
+message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                birth_domains_resid$overall_mean_bss,
+                birth_domains_resid$overall_mean_bss - featureless_birth$overall_mean_bss))
+
+message("\nItems (Age/Gender Residualized):")
+message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                current_items_resid$overall_mean_bss,
+                current_items_resid$overall_mean_bss - featureless_current$overall_mean_bss))
+message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                birth_items_resid$overall_mean_bss,
+                birth_items_resid$overall_mean_bss - featureless_birth$overall_mean_bss))
 
 # ============================================================================
 # VISUALIZATION 2: COMPREHENSIVE HEATMAP - ALL PREDICTORS × ALL CONDITIONS
