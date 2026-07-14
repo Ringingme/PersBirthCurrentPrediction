@@ -114,26 +114,11 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   message(paste0("\n=== Running unified model: ", label, " ==="))
   
   # 1. Prepare data for analysis
-  if (residualize) {
-    analysis_data <- df %>%
-      select(all_of(c(pred_cols, "gender", "ageAtAgreement", outcome_var, 
-                      "currentResidenceType2", "birthResidenceType"))) %>%
-      drop_na(!!sym(outcome_var), gender, ageAtAgreement)
-    
-    # Residualize predictors within the analysis dataset
-    # Use na.action = na.exclude so residuals vector matches data dimensions
-    for (col in pred_cols) {
-      residuals_vec <- residuals(lm(as.formula(paste(col, "~ gender + ageAtAgreement")), 
-                                     data = analysis_data, 
-                                     na.action = na.exclude))
-      analysis_data[[col]] <- residuals_vec
-    }
-  } else {
-    analysis_data <- df %>%
-      select(all_of(c(pred_cols, outcome_var, 
-                      "currentResidenceType2", "birthResidenceType"))) %>%
-      drop_na(!!sym(outcome_var))
-  }
+  # NOTE: If residualize=TRUE, we do NOT residualize here; we'll do it within each fold
+  analysis_data <- df %>%
+    select(all_of(c(pred_cols, "gender", "ageAtAgreement", outcome_var, 
+                    "currentResidenceType2", "birthResidenceType"))) %>%
+    drop_na(!!sym(outcome_var), gender, ageAtAgreement)
   
   # Keep columns needed for mover/stayer identification
   full_data <- analysis_data
@@ -142,7 +127,7 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   # Get outcome classes
   target_classes <- sort(unique(full_data[[outcome_var]]))
   
-  # 2. Create task for classification
+  # 2. Create task for classification (use raw data initially; will residualize per fold)
   task_data <- analysis_data %>% 
     select(all_of(c(pred_cols, outcome_var))) %>%
     rename(target = !!sym(outcome_var))
@@ -183,8 +168,32 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     train_idx <- resampling$train_set(i)
     test_idx <- resampling$test_set(i)
     
+    # Clone the task for this fold
     task_train <- task$clone()$filter(train_idx)
     task_test <- task$clone()$filter(test_idx)
+    
+    # 5a. IF residualizing, fit residualization model on TRAINING data only
+    if (residualize) {
+      # Get training data with all columns
+      train_data_full <- analysis_data %>% slice(train_idx)
+      test_data_full <- analysis_data %>% slice(test_idx)
+      
+      # Fit lm models on training data
+      for (col in pred_cols) {
+        # Fit on training data only
+        lm_fit <- lm(as.formula(paste(col, "~ gender + ageAtAgreement")), 
+                     data = train_data_full, 
+                     na.action = na.exclude)
+        
+        # Predict residuals for both train and test
+        train_residuals <- residuals(lm_fit, newdata = train_data_full)
+        test_residuals <- residuals(lm_fit, newdata = test_data_full)
+        
+        # Update task data with residualized values
+        task_train$data()[[col]] <- train_residuals
+        task_test$data()[[col]] <- test_residuals
+      }
+    }
     
     # Train on training set
     learner$train(task_train)
