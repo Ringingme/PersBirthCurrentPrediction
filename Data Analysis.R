@@ -1,4 +1,4 @@
-setwd("/data/scripts/Ling/Proj5birthCurrentPrediction/")
+setwd("/data/scripts/Ling/Proj5BirthCurrentPrediction/")
 
 
 # Packages
