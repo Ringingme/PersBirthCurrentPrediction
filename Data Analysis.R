@@ -16,10 +16,61 @@ library(paradox)
 # ============================================================================
 NP_resi = read.csv("NP_resi.csv") |> rename_with(~ sub("\\.x$", "", .x))|> 
   select(-neuroticism23R, -neuroticism24, -neuroticism31, -neuroticism32R, -neuroticism41, -neuroticism42, -neuroticism43R, -neuroticism52, -others12, -others14)
-data <- NP_resi  |> select(1:217) 
+mig_b5 <- read.csv("/data/scripts/Ling/Proj3Migration/MigPrediction/migB5.csv") |> select(scode, migrator_type18)
+data <- NP_resi  |> select(1:217) |> left_join(mig_b5, by = "scode") 
 data$gender = as.factor(data$gender)
 
-## Separate movers and stayers (used for evaluation only)
+## Create birth and current residence outcome variables (combining location + migration status)
+data <- data %>%
+  mutate(
+    # 1. Create Birth Residence Types (7 categories)
+    birth_residence_types = case_when(
+      migrator_type18 == "Village stayer"       ~ "stayer_village",
+      migrator_type18 == "Town stayer"          ~ "stayer_town",
+      migrator_type18 == "City stayer"          ~ "stayer_city",
+      
+      # Born in Village (and moved elsewhere)
+      migrator_type18 %in% c("Village to town", "Village to city", "Village to abroad") ~ "born_village",
+      
+      # Born in Town (and moved elsewhere)
+      migrator_type18 %in% c("Town to village", "Town to city", "Town to abroad", "Town to town") ~ "born_town",
+      
+      # Born in City (and moved elsewhere)
+      migrator_type18 %in% c("City to village", "City to town", "City to abroad", "City to city") ~ "born_city",
+      
+      # Born Abroad (and moved elsewhere)
+      migrator_type18 %in% c("Abroad to village", "Abroad to town", "Abroad to city") ~ "born_abroad",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    # 2. Create Current Residence Types (7-8 categories)
+    current_residence_types = case_when(
+      migrator_type18 == "Village stayer"       ~ "stayer_village",
+      migrator_type18 == "Town stayer"          ~ "stayer_town",
+      migrator_type18 == "City stayer"          ~ "stayer_city",
+      
+      # Currently in Village (and migrated there)
+      migrator_type18 %in% c("Town to village", "City to village", "Abroad to village") ~ "current_village",
+      
+      # Currently in Town (and migrated there)
+      migrator_type18 %in% c("Village to town", "City to town", "Abroad to town", "Town to town") ~ "current_town",
+      
+      # Currently in City (and migrated there)
+      migrator_type18 %in% c("Village to city", "Town to city", "Abroad to city", "City to city") ~ "current_city",
+      
+      # Currently Abroad (and migrated there)
+      migrator_type18 %in% c("Village to abroad", "Town to abroad", "City to abroad") ~ "current_abroad",
+      
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  mutate(
+    birth_residence_types = as.factor(birth_residence_types),
+    current_residence_types = as.factor(current_residence_types)
+  )
+
+## Separate movers and stayers (used for post-hoc evaluation only)
 data_movers <- data |> filter(currentResidenceType2 != birthResidenceType)
 data_stayers <- data |> filter(currentResidenceType2 == birthResidenceType)
 
@@ -109,7 +160,8 @@ evaluate_on_subset <- function(predictions, true_outcomes, subset_mask, target_c
 # This performs repeated stratified cross-validation.
 # To implement hyperparameter tuning, you would need an inner resampling loop.
 
-unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label, resampling = NULL) {
+unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label, 
+                          fold_indices = NULL) {
   
   message(paste0("\n=== Running unified model: ", label, " ==="))
   
@@ -138,16 +190,11 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     id = label
   )
   
-  # 3. Stratified repeated CV: 5-fold, 10 repeats (50 test sets total)
-  if (is.null(resampling)) {
-    resampling <- rsmp("repeated_cv", folds = 5, repeats = 10)
+  # 3. Use provided fold indices (DO NOT instantiate - reuse stored indices for consistency)
+  if (is.null(fold_indices)) {
+    stop("fold_indices must be provided to ensure identical folds across all models")
   }
-  
-  # Ensure stratification on outcome classes
-  task$col_roles$stratum <- "target"
-  
-  # Instantiate the resampling object on the task
-  resampling$instantiate(task)
+  n_folds <- length(fold_indices)
   
   # 4. Define learner (multinomial regression)
   # NOTE: classif.multinom is used without hyperparameter tuning
@@ -159,14 +206,14 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   learner <- as_learner(graph)
   learner$id <- paste0("MultinomReg_", label)
   
-  # 5. Run repeated stratified CV
+  # 5. Run repeated stratified CV using pre-stored fold indices
   all_fold_results <- list()
   
-  for (i in 1:resampling$iters) {
-    if (i %% 5 == 0) message(paste0("  Completed fold ", i, " of ", resampling$iters))
+  for (i in 1:n_folds) {
+    if (i %% 5 == 0) message(paste0("  Completed fold ", i, " of ", n_folds))
     
-    train_idx <- resampling$train_set(i)
-    test_idx <- resampling$test_set(i)
+    train_idx <- fold_indices[[i]]$train
+    test_idx <- fold_indices[[i]]$test
     
     # Clone the task for this fold
     task_train <- task$clone()$filter(train_idx)
@@ -185,9 +232,12 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
                      data = train_data_full, 
                      na.action = na.exclude)
         
-        # Predict residuals for both train and test
-        train_residuals <- residuals(lm_fit, newdata = train_data_full)
-        test_residuals <- residuals(lm_fit, newdata = test_data_full)
+        # Get residuals for training data (from the fitted lm object)
+        train_residuals <- residuals(lm_fit)
+        
+        # Get residuals for test data (predict on test, subtract from actual)
+        test_pred <- predict(lm_fit, newdata = test_data_full)
+        test_residuals <- test_data_full[[col]] - test_pred
         
         # Update task data with residualized values
         task_train$data()[[col]] <- train_residuals
@@ -293,8 +343,7 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     all_pred_probs = all_pred,
     all_true_outcomes = all_true,
     mover_mask = mover_mask,
-    stayer_mask = stayer_mask,
-    resampling = resampling
+    stayer_mask = stayer_mask
   ))
 }
 
@@ -303,96 +352,143 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
 # RUN MODELS
 # ============================================================================
 # Create a single resampling object to ensure all models use identical folds
+# IMPORTANT: Instantiate ONCE on a reference task, then reuse indices for all models
 set.seed(42)
+
+# Create reference task for stratification (use birth_residence_types as reference)
+# We'll instantiate the resampling on this, then reuse the fold indices for all models
+analysis_data_ref <- data %>%
+  select(all_of(c(colnames(data)[4:8], "gender", "ageAtAgreement", "birth_residence_types", 
+                  "currentResidenceType2", "birthResidenceType"))) %>%
+  drop_na(birth_residence_types, gender, ageAtAgreement)
+
+task_ref <- as_task_classif(
+  analysis_data_ref %>% select(all_of(c(colnames(data)[4:8], "birth_residence_types"))) %>% rename(target = birth_residence_types),
+  target = "target",
+  id = "reference_for_resampling"
+)
+task_ref$col_roles$stratum <- "target"
+
+# Instantiate the resampling object ONCE on the reference task
 shared_resampling <- rsmp("repeated_cv", folds = 5, repeats = 10)
+shared_resampling$instantiate(task_ref)
 
-# Model A1: Predict CURRENT residence (items - raw)
-current_items_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[30:217],
-  outcome_var = "currentResidenceType2",
-  residualize = FALSE,
-  label = "current_items_raw",
-  resampling = shared_resampling
-)
-saveRDS(current_items_raw, file = "current_items_raw.rds")
+# Extract and store the fold indices for reuse
+stored_fold_indices <- list()
+for (i in 1:shared_resampling$iters) {
+  stored_fold_indices[[i]] <- list(
+    train = shared_resampling$train_set(i),
+    test = shared_resampling$test_set(i)
+  )
+}
 
-# Model A2: Predict BIRTH residence (items - raw)
-birth_items_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[30:217],
-  outcome_var = "birthResidenceType",
-  residualize = FALSE,
-  label = "birth_items_raw",
-  resampling = shared_resampling
-)
-saveRDS(birth_items_raw, file = "birth_items_raw.rds")
+message("Resampling object instantiated ONCE on reference task (birth_residence_types)")
+message(sprintf("Stored %d fold indices for reuse across all models", length(stored_fold_indices)))
 
-# Current residence (domains - raw)
-current_domains_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[4:8],
-  outcome_var = "currentResidenceType2",
-  residualize = FALSE,
-  label = "current_domains_raw",
-  resampling = shared_resampling
-)
-saveRDS(current_domains_raw, file = "current_domains_raw.rds")
+message("\n" %+% strrep("=", 90))
+message("PRIMARY ANALYSIS: RESIDUALIZED MODELS (Age/Gender Controlled)")
+message("Using combined location + migration status outcome variables")
+message(strrep("=", 90))
 
-# Birth residence (domains - raw)
-birth_domains_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[4:8],
-  outcome_var = "birthResidenceType",
-  residualize = FALSE,
-  label = "birth_domains_raw",
-  resampling = shared_resampling
-)
-saveRDS(birth_domains_raw, file = "birth_domains_raw.rds")
+# ============================================================================
+# RESIDUALIZED MODELS (PRIMARY ANALYSIS)
+# ============================================================================
 
-# Current residence (items - residualized)
-current_items_resid <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[30:217],
-  outcome_var = "currentResidenceType2",
-  residualize = TRUE,
-  label = "current_items_resid",
-  resampling = shared_resampling
-)
-saveRDS(current_items_resid, file = "current_items_resid.rds")
-
-# Birth residence (items - residualized)
-birth_items_resid <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[30:217],
-  outcome_var = "birthResidenceType",
-  residualize = TRUE,
-  label = "birth_items_resid",
-  resampling = shared_resampling
-)
-saveRDS(birth_items_resid, file = "birth_items_resid.rds")
-
-# Current residence (domains - residualized)
-current_domains_resid <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[4:8],
-  outcome_var = "currentResidenceType2",
-  residualize = TRUE,
-  label = "current_domains_resid",
-  resampling = shared_resampling
-)
-saveRDS(current_domains_resid, file = "current_domains_resid.rds")
-
-# Birth residence (domains - residualized)
+# Model 1: Predict BIRTH residence with DOMAINS (residualized)
 birth_domains_resid <- unified_model(
   df = data,
   pred_cols = colnames(data)[4:8],
-  outcome_var = "birthResidenceType",
+  outcome_var = "birth_residence_types",
   residualize = TRUE,
   label = "birth_domains_resid",
-  resampling = shared_resampling
+  fold_indices = stored_fold_indices
 )
 saveRDS(birth_domains_resid, file = "birth_domains_resid.rds")
+
+# Model 2: Predict BIRTH residence with ITEMS (residualized)
+birth_items_resid <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "birth_residence_types",
+  residualize = TRUE,
+  label = "birth_items_resid",
+  fold_indices = stored_fold_indices
+)
+saveRDS(birth_items_resid, file = "birth_items_resid.rds")
+
+# Model 3: Predict CURRENT residence with DOMAINS (residualized)
+current_domains_resid <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "current_residence_types",
+  residualize = TRUE,
+  label = "current_domains_resid",
+  fold_indices = stored_fold_indices
+)
+saveRDS(current_domains_resid, file = "current_domains_resid.rds")
+
+# Model 4: Predict CURRENT residence with ITEMS (residualized)
+current_items_resid <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "current_residence_types",
+  residualize = TRUE,
+  label = "current_items_resid",
+  fold_indices = stored_fold_indices
+)
+saveRDS(current_items_resid, file = "current_items_resid.rds")
+
+# ============================================================================
+# OPTIONAL: RAW MODELS (Non-residualized for comparison)
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("OPTIONAL: RAW MODELS (Without Age/Gender Residualization)")
+message(strrep("=", 90))
+
+# Model 5: Predict BIRTH residence with DOMAINS (raw)
+birth_domains_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "birth_residence_types",
+  residualize = FALSE,
+  label = "birth_domains_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(birth_domains_raw, file = "birth_domains_raw.rds")
+
+# Model 6: Predict BIRTH residence with ITEMS (raw)
+birth_items_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "birth_residence_types",
+  residualize = FALSE,
+  label = "birth_items_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(birth_items_raw, file = "birth_items_raw.rds")
+
+# Model 7: Predict CURRENT residence with DOMAINS (raw)
+current_domains_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "current_residence_types",
+  residualize = FALSE,
+  label = "current_domains_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(current_domains_raw, file = "current_domains_raw.rds")
+
+# Model 8: Predict CURRENT residence with ITEMS (raw)
+current_items_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "current_residence_types",
+  residualize = FALSE,
+  label = "current_items_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(current_items_raw, file = "current_items_raw.rds")
 
 
 # ============================================================================
@@ -405,14 +501,20 @@ message("\n" %+% strrep("=", 90))
 message("TRAINING FEATURELESS BASELINE MODELS")
 message(strrep("=", 90))
 
-featureless_baseline <- function(outcome_var, resampling, data_full) {
+featureless_baseline <- function(outcome_var, fold_indices, data_full) {
   message(paste0("\n=== Running featureless baseline: ", outcome_var, " ==="))
   
+  # Prepare data
+  analysis_data <- data_full %>%
+    select(all_of(c("gender", "ageAtAgreement", outcome_var, 
+                    "currentResidenceType2", "birthResidenceType"))) %>%
+    drop_na(!!sym(outcome_var), gender, ageAtAgreement)
+  
   # Get outcome classes
-  target_classes <- sort(unique(data_full[[outcome_var]]))
+  target_classes <- sort(unique(analysis_data[[outcome_var]]))
   
   # Create task
-  task_data <- data_full %>%
+  task_data <- analysis_data %>%
     select(all_of(outcome_var)) %>%
     rename(target = !!sym(outcome_var))
   
@@ -422,19 +524,19 @@ featureless_baseline <- function(outcome_var, resampling, data_full) {
     id = paste0("Featureless_", outcome_var)
   )
   
-  # Ensure stratification
-  task$col_roles$stratum <- "target"
-  
-  # Instantiate resampling
-  resampling$instantiate(task)
+  # Use provided fold indices (DO NOT instantiate - reuse stored indices)
+  if (is.null(fold_indices)) {
+    stop("fold_indices must be provided to ensure identical folds across all models")
+  }
+  n_folds <- length(fold_indices)
   
   all_fold_results <- list()
   
-  for (i in 1:resampling$iters) {
-    if (i %% 5 == 0) message(paste0("  Completed fold ", i, " of ", resampling$iters))
+  for (i in 1:n_folds) {
+    if (i %% 5 == 0) message(paste0("  Completed fold ", i, " of ", n_folds))
     
-    train_idx <- resampling$train_set(i)
-    test_idx <- resampling$test_set(i)
+    train_idx <- fold_indices[[i]]$train
+    test_idx <- fold_indices[[i]]$test
     
     task_train <- task$clone()$filter(train_idx)
     task_test <- task$clone()$filter(test_idx)
@@ -538,29 +640,52 @@ featureless_baseline <- function(outcome_var, resampling, data_full) {
     all_pred_probs = all_pred,
     all_true_outcomes = all_true,
     mover_mask = mover_mask,
-    stayer_mask = stayer_mask,
-    resampling = resampling
+    stayer_mask = stayer_mask
   ))
 }
 
-# Train featureless baselines
-featureless_current <- featureless_baseline(
-  outcome_var = "currentResidenceType2",
-  resampling = shared_resampling,
-  data_full = data
-)
-saveRDS(featureless_current, file = "featureless_current.rds")
-
+# Train featureless baselines (for residualized analysis)
 featureless_birth <- featureless_baseline(
-  outcome_var = "birthResidenceType",
-  resampling = shared_resampling,
+  outcome_var = "birth_residence_types",
+  fold_indices = stored_fold_indices,
   data_full = data
 )
 saveRDS(featureless_birth, file = "featureless_birth.rds")
 
+featureless_current <- featureless_baseline(
+  outcome_var = "current_residence_types",
+  fold_indices = stored_fold_indices,
+  data_full = data
+)
+saveRDS(featureless_current, file = "featureless_current.rds")
+
 message("\nFeatureless Baseline BSS Summary:")
-message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
 message(sprintf("  Birth Residence: Overall BSS = %.4f", featureless_birth$overall_mean_bss))
+message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
+
+# ============================================================================
+# DATA SUMMARY: Class Distribution
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("OUTCOME VARIABLE DISTRIBUTION")
+message(strrep("=", 90))
+
+message("\nBirth Residence Types (7 classes):")
+birth_dist <- table(data$birth_residence_types)
+for (class in names(birth_dist)) {
+  pct <- 100 * birth_dist[class] / sum(birth_dist)
+  message(sprintf("  %-20s: %6d samples (%5.1f%%)", class, birth_dist[class], pct))
+}
+message(sprintf("  Total: %d samples", sum(birth_dist)))
+
+message("\nCurrent Residence Types (7-8 classes):")
+current_dist <- table(data$current_residence_types)
+for (class in names(current_dist)) {
+  pct <- 100 * current_dist[class] / sum(current_dist)
+  message(sprintf("  %-20s: %6d samples (%5.1f%%)", class, current_dist[class], pct))
+}
+message(sprintf("  Total: %d samples", sum(current_dist)))
 
 
 # ============================================================================
@@ -575,193 +700,137 @@ message("=" %+% strrep("=", 90))
 # ============================================================================
 # SECTION A: Current vs Birth Residence Prediction (Aggregate across classes)
 # ============================================================================
+# Comparing predictability of birth location vs current location
+# Both models use combined location + migration status outcome (7-8 classes each)
+# Key question: Which is more predictable from personality?
 
 message("\n" %+% strrep("-", 90))
-message("SECTION A: Current vs Birth Residence (Multiclass Average)")
+message("SECTION A: Current vs Birth Residence Predictability (Residualized)")
+message("Comparing BSS: birth_residence_types vs current_residence_types")
 message(strrep("-", 90))
 
-# Test A1: Current vs Birth for ITEMS (raw)
-message("\nA1: Current vs Birth prediction (ITEMS - RAW)")
-test_A1 <- nadeau_bengio_test(current_items_raw$all_bss_values, birth_items_raw$all_bss_values)
+# Test A1: Current vs Birth for DOMAINS (residualized)
+message("\nA1: Birth vs Current prediction (DOMAINS - RESIDUALIZED)")
+test_A1 <- nadeau_bengio_test(current_domains_resid$all_bss_values, birth_domains_resid$all_bss_values)
 message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A1$mean_diff, 4)))
 message(paste0("  t-stat: ", round(test_A1$t_stat, 4), " | p-value: ", round(test_A1$p_value, 4)))
 if (test_A1$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
-# Test A2: Current vs Birth for DOMAINS (raw)
-message("\nA2: Current vs Birth prediction (DOMAINS - RAW)")
-test_A2 <- nadeau_bengio_test(current_domains_raw$all_bss_values, birth_domains_raw$all_bss_values)
+# Test A2: Current vs Birth for ITEMS (residualized)
+message("\nA2: Birth vs Current prediction (ITEMS - RESIDUALIZED)")
+test_A2 <- nadeau_bengio_test(current_items_resid$all_bss_values, birth_items_resid$all_bss_values)
 message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A2$mean_diff, 4)))
 message(paste0("  t-stat: ", round(test_A2$t_stat, 4), " | p-value: ", round(test_A2$p_value, 4)))
 if (test_A2$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
-# Test A3: Current vs Birth for ITEMS (residualized)
-message("\nA3: Current vs Birth prediction (ITEMS - RESIDUALIZED)")
-test_A3 <- nadeau_bengio_test(current_items_resid$all_bss_values, birth_items_resid$all_bss_values)
+# Test A3: Raw models comparison (optional)
+message("\nA3: Birth vs Current prediction (DOMAINS - RAW)")
+test_A3 <- nadeau_bengio_test(current_domains_raw$all_bss_values, birth_domains_raw$all_bss_values)
 message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A3$mean_diff, 4)))
 message(paste0("  t-stat: ", round(test_A3$t_stat, 4), " | p-value: ", round(test_A3$p_value, 4)))
 if (test_A3$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
-# Test A4: Current vs Birth for DOMAINS (residualized)
-message("\nA4: Current vs Birth prediction (DOMAINS - RESIDUALIZED)")
-test_A4 <- nadeau_bengio_test(current_domains_resid$all_bss_values, birth_domains_resid$all_bss_values)
+# Test A4: Raw models comparison (optional)
+message("\nA4: Birth vs Current prediction (ITEMS - RAW)")
+test_A4 <- nadeau_bengio_test(current_items_raw$all_bss_values, birth_items_raw$all_bss_values)
 message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A4$mean_diff, 4)))
 message(paste0("  t-stat: ", round(test_A4$t_stat, 4), " | p-value: ", round(test_A4$p_value, 4)))
 if (test_A4$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
 # ============================================================================
-# SECTION B: Movers vs Stayers - CURRENT Residence (Per-Class)
+# SECTION B: Additional Comparisons (Optional)
 # ============================================================================
+# NOTE: Mover/Stayer status is now built into the outcome class labels
+# (e.g., "stayer_village" vs "born_village"), so post-hoc subgroup analysis
+# is less critical. If needed, can be implemented here by subsetting classes.
 
 message("\n" %+% strrep("-", 90))
-message("SECTION B: Movers vs Stayers - CURRENT Residence (Per-Class)")
+message("SECTION B: Domains vs Items Comparison (Residualized)")
 message(strrep("-", 90))
 
-# B1: Items (raw)
-message("\nB1: Current Residence - ITEMS (RAW)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(current_items_raw$target_classes)) {
-  class_val <- current_items_raw$target_classes[class_idx]
-  test_B1_class <- nadeau_bengio_test(
-    matrix(current_items_raw$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(current_items_raw$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_B1_class$mean_diff, 4), 
-                 " | p=", round(test_B1_class$p_value, 4),
-                 if_else(test_B1_class$p_value < 0.05, " *", "")))
-}
+# Compare: Do items predict better than domains?
+message("\nB1: Current Residence - Domains vs Items (RESIDUALIZED)")
+test_B1 <- nadeau_bengio_test(current_domains_resid$all_bss_values, current_items_resid$all_bss_values)
+message(paste0("  Mean BSS diff (Items - Domains): ", round(test_B1$mean_diff, 4)))
+message(paste0("  t-stat: ", round(test_B1$t_stat, 4), " | p-value: ", round(test_B1$p_value, 4)))
+if (test_B1$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
-# B2: Domains (raw)
-message("\nB2: Current Residence - DOMAINS (RAW)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(current_domains_raw$target_classes)) {
-  class_val <- current_domains_raw$target_classes[class_idx]
-  test_B2_class <- nadeau_bengio_test(
-    matrix(current_domains_raw$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(current_domains_raw$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_B2_class$mean_diff, 4), 
-                 " | p=", round(test_B2_class$p_value, 4),
-                 if_else(test_B2_class$p_value < 0.05, " *", "")))
-}
-
-# B3: Items (residualized)
-message("\nB3: Current Residence - ITEMS (RESIDUALIZED)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(current_items_resid$target_classes)) {
-  class_val <- current_items_resid$target_classes[class_idx]
-  test_B3_class <- nadeau_bengio_test(
-    matrix(current_items_resid$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(current_items_resid$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_B3_class$mean_diff, 4), 
-                 " | p=", round(test_B3_class$p_value, 4),
-                 if_else(test_B3_class$p_value < 0.05, " *", "")))
-}
-
-# B4: Domains (residualized)
-message("\nB4: Current Residence - DOMAINS (RESIDUALIZED)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(current_domains_resid$target_classes)) {
-  class_val <- current_domains_resid$target_classes[class_idx]
-  test_B4_class <- nadeau_bengio_test(
-    matrix(current_domains_resid$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(current_domains_resid$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_B4_class$mean_diff, 4), 
-                 " | p=", round(test_B4_class$p_value, 4),
-                 if_else(test_B4_class$p_value < 0.05, " *", "")))
-}
+message("\nB2: Birth Residence - Domains vs Items (RESIDUALIZED)")
+test_B2 <- nadeau_bengio_test(birth_domains_resid$all_bss_values, birth_items_resid$all_bss_values)
+message(paste0("  Mean BSS diff (Items - Domains): ", round(test_B2$mean_diff, 4)))
+message(paste0("  t-stat: ", round(test_B2$t_stat, 4), " | p-value: ", round(test_B2$p_value, 4)))
+if (test_B2$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
 # ============================================================================
-# SECTION C: Movers vs Stayers - BIRTH Residence (Per-Class)
+# SECTION C: Per-Settlement-Type Comparisons (Overlapping Classes Only)
 # ============================================================================
+# NOTE: Birth and Current models have different outcome classes.
+# Overlapping classes (present in BOTH models): stayer_village, stayer_town, stayer_city
+# These comparisons test: Is each stayer type more predictable from birth history or current location?
 
 message("\n" %+% strrep("-", 90))
-message("SECTION C: Movers vs Stayers - BIRTH Residence (Per-Class)")
+message("SECTION C: Per-Settlement-Type Comparisons (RESIDUALIZED)")
+message("Only for overlapping settlement types: stayer_village, stayer_town, stayer_city")
 message(strrep("-", 90))
 
-# C1: Items (raw)
-message("\nC1: Birth Residence - ITEMS (RAW)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(birth_items_raw$target_classes)) {
-  class_val <- birth_items_raw$target_classes[class_idx]
-  test_C1_class <- nadeau_bengio_test(
-    matrix(birth_items_raw$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(birth_items_raw$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_C1_class$mean_diff, 4), 
-                 " | p=", round(test_C1_class$p_value, 4),
-                 if_else(test_C1_class$p_value < 0.05, " *", "")))
+# Helper function: Extract BSS for a specific class/settlement type
+get_class_bss_column <- function(model_object, class_name) {
+  class_idx <- which(model_object$target_classes == class_name)
+  if (length(class_idx) == 0) {
+    return(NULL)  # Class not found in this model
+  }
+  return(model_object$all_bss_values[, class_idx])
 }
 
-# C2: Domains (raw)
-message("\nC2: Birth Residence - DOMAINS (RAW)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(birth_domains_raw$target_classes)) {
-  class_val <- birth_domains_raw$target_classes[class_idx]
-  test_C2_class <- nadeau_bengio_test(
-    matrix(birth_domains_raw$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(birth_domains_raw$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_C2_class$mean_diff, 4), 
-                 " | p=", round(test_C2_class$p_value, 4),
-                 if_else(test_C2_class$p_value < 0.05, " *", "")))
+# Test per settlement type for DOMAINS (residualized)
+message("\nC1: DOMAINS - Residualized (Comparing overlapping settlement types)")
+message("  Testing if each settlement type is more predictable from birth vs current")
+
+overlapping_classes <- c("stayer_village", "stayer_town", "stayer_city")
+
+for (settlement in overlapping_classes) {
+  bss_birth <- get_class_bss_column(birth_domains_resid, settlement)
+  bss_current <- get_class_bss_column(current_domains_resid, settlement)
+  
+  if (!is.null(bss_birth) && !is.null(bss_current)) {
+    # Create matrices for nadeau_bengio_test (needs shape n_folds x n_classes)
+    bss_birth_mat <- as.matrix(bss_birth)
+    bss_current_mat <- as.matrix(bss_current)
+    
+    test_result <- nadeau_bengio_test(bss_current_mat, bss_birth_mat)
+    
+    message(sprintf("\n  %s:", settlement))
+    message(sprintf("    Mean BSS (Current): %.4f", mean(bss_current, na.rm = TRUE)))
+    message(sprintf("    Mean BSS (Birth):   %.4f", mean(bss_birth, na.rm = TRUE)))
+    message(sprintf("    Diff (Current - Birth): %.4f", test_result$mean_diff))
+    message(sprintf("    t-stat: %.4f | p-value: %.4f", test_result$t_stat, test_result$p_value))
+    if (test_result$p_value < 0.05) message(sprintf("    *** SIGNIFICANT *** (Current %s predictable)", 
+                                                     ifelse(test_result$mean_diff > 0, "MORE", "LESS")))
+  }
 }
 
-# C3: Items (residualized)
-message("\nC3: Birth Residence - ITEMS (RESIDUALIZED)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(birth_items_resid$target_classes)) {
-  class_val <- birth_items_resid$target_classes[class_idx]
-  test_C3_class <- nadeau_bengio_test(
-    matrix(birth_items_resid$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(birth_items_resid$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_C3_class$mean_diff, 4), 
-                 " | p=", round(test_C3_class$p_value, 4),
-                 if_else(test_C3_class$p_value < 0.05, " *", "")))
-}
+# Test per settlement type for ITEMS (residualized)
+message("\n\nC2: ITEMS - Residualized (Comparing overlapping settlement types)")
+message("  Testing if each settlement type is more predictable from birth vs current")
 
-# C4: Domains (residualized)
-message("\nC4: Birth Residence - DOMAINS (RESIDUALIZED)")
-message("  Class-wise comparison (Movers BSS vs Stayers BSS):")
-for (class_idx in 1:length(birth_domains_resid$target_classes)) {
-  class_val <- birth_domains_resid$target_classes[class_idx]
-  test_C4_class <- nadeau_bengio_test(
-    matrix(birth_domains_resid$bss_movers_per_fold[, class_idx], ncol = 1),
-    matrix(birth_domains_resid$bss_stayers_per_fold[, class_idx], ncol = 1)
-  )
-  message(paste0("    ", class_val, ": diff=", round(test_C4_class$mean_diff, 4), 
-                 " | p=", round(test_C4_class$p_value, 4),
-                 if_else(test_C4_class$p_value < 0.05, " *", "")))
-}
-
-# ============================================================================
-# SUMMARY: Descriptive Statistics
-# ============================================================================
-
-message("\n" %+% strrep("-", 90))
-message("SECTION D: Descriptive Statistics (Mean BSS per Class)")
-message(strrep("-", 90))
-
-# Current Residence - Items (Raw)
-message("\nD1: Current Residence - ITEMS (RAW)")
-message("      Settlement Type | Movers Mean BSS | Stayers Mean BSS | Difference")
-for (class_idx in 1:length(current_items_raw$target_classes)) {
-  class_val <- current_items_raw$target_classes[class_idx]
-  m_mean <- mean(current_items_raw$bss_movers_per_fold[, class_idx], na.rm = TRUE)
-  s_mean <- mean(current_items_raw$bss_stayers_per_fold[, class_idx], na.rm = TRUE)
-  message(sprintf("      %-15s | %15.4f | %16.4f | %10.4f", class_val, m_mean, s_mean, m_mean - s_mean))
-}
-
-# Birth Residence - Items (Raw)
-message("\nD2: Birth Residence - ITEMS (RAW)")
-message("      Settlement Type | Movers Mean BSS | Stayers Mean BSS | Difference")
-for (class_idx in 1:length(birth_items_raw$target_classes)) {
-  class_val <- birth_items_raw$target_classes[class_idx]
-  m_mean <- mean(birth_items_raw$bss_movers_per_fold[, class_idx], na.rm = TRUE)
-  s_mean <- mean(birth_items_raw$bss_stayers_per_fold[, class_idx], na.rm = TRUE)
-  message(sprintf("      %-15s | %15.4f | %16.4f | %10.4f", class_val, m_mean, s_mean, m_mean - s_mean))
+for (settlement in overlapping_classes) {
+  bss_birth <- get_class_bss_column(birth_items_resid, settlement)
+  bss_current <- get_class_bss_column(current_items_resid, settlement)
+  
+  if (!is.null(bss_birth) && !is.null(bss_current)) {
+    bss_birth_mat <- as.matrix(bss_birth)
+    bss_current_mat <- as.matrix(bss_current)
+    
+    test_result <- nadeau_bengio_test(bss_current_mat, bss_birth_mat)
+    
+    message(sprintf("\n  %s:", settlement))
+    message(sprintf("    Mean BSS (Current): %.4f", mean(bss_current, na.rm = TRUE)))
+    message(sprintf("    Mean BSS (Birth):   %.4f", mean(bss_birth, na.rm = TRUE)))
+    message(sprintf("    Diff (Current - Birth): %.4f", test_result$mean_diff))
+    message(sprintf("    t-stat: %.4f | p-value: %.4f", test_result$t_stat, test_result$p_value))
+    if (test_result$p_value < 0.05) message(sprintf("    *** SIGNIFICANT *** (Current %s predictable)", 
+                                                     ifelse(test_result$mean_diff > 0, "MORE", "LESS")))
+  }
 }
 
 # ============================================================================
@@ -916,7 +985,7 @@ message("\n--- Current Residence (Items - RESIDUALIZED) ---")
 hm_current_items_resid <- generate_correlation_heatmap(
   model_object = current_items_resid,
   pred_cols = colnames(data)[30:217],
-  outcome_var = "currentResidenceType2",
+  outcome_var = "current_residence_types",
   data = data
 )
 
@@ -947,7 +1016,7 @@ message("\n--- Current Residence (Domains - RESIDUALIZED) ---")
 hm_current_domains_resid <- generate_correlation_heatmap(
   model_object = current_domains_resid,
   pred_cols = colnames(data)[4:8],
-  outcome_var = "currentResidenceType2",
+  outcome_var = "current_residence_types",
   data = data
 )
 message(paste0("  Domains: all ", ncol(hm_current_domains_resid), " included in main text"))
@@ -957,7 +1026,7 @@ message("\n--- Birth Residence (Items - RESIDUALIZED) ---")
 hm_birth_items_resid <- generate_correlation_heatmap(
   model_object = birth_items_resid,
   pred_cols = colnames(data)[30:217],
-  outcome_var = "birthResidenceType",
+  outcome_var = "birth_residence_types",
   data = data
 )
 
@@ -984,7 +1053,7 @@ message("\n--- Birth Residence (Domains - RESIDUALIZED) ---")
 hm_birth_domains_resid <- generate_correlation_heatmap(
   model_object = birth_domains_resid,
   pred_cols = colnames(data)[4:8],
-  outcome_var = "birthResidenceType",
+  outcome_var = "birth_residence_types",
   data = data
 )
 message(paste0("  Domains: all ", ncol(hm_birth_domains_resid), " included in main text"))
@@ -1271,29 +1340,47 @@ message("  Saved: histogram_model_performance.png")
 
 # Summary: Featureless baseline vs personality models
 message("\n" %+% strrep("=", 90))
-message("COMPARISON: Featureless Baseline vs Personality Models")
+message("MODEL PERFORMANCE SUMMARY")
+message("Outcome: Birth & Current Residence (combined location + migration status)")
 message(strrep("=", 90))
 
 message("\nFeatureless Baseline (Expected BSS ≈ 0.00):")
-message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
 message(sprintf("  Birth Residence: Overall BSS = %.4f", featureless_birth$overall_mean_bss))
+message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
 
-message("\nPersonality Models Improvement over Baseline:")
-message("\nDomains (Age/Gender Residualized):")
-message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
-                current_domains_resid$overall_mean_bss,
-                current_domains_resid$overall_mean_bss - featureless_current$overall_mean_bss))
+message("\nPersonality Models - Residualized (Age/Gender Controlled) - PRIMARY ANALYSIS:")
+message("\nDomains (5 Big Five):")
 message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
                 birth_domains_resid$overall_mean_bss,
                 birth_domains_resid$overall_mean_bss - featureless_birth$overall_mean_bss))
-
-message("\nItems (Age/Gender Residualized):")
 message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
-                current_items_resid$overall_mean_bss,
-                current_items_resid$overall_mean_bss - featureless_current$overall_mean_bss))
+                current_domains_resid$overall_mean_bss,
+                current_domains_resid$overall_mean_bss - featureless_current$overall_mean_bss))
+
+message("\nItems (188 personality items):")
 message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
                 birth_items_resid$overall_mean_bss,
                 birth_items_resid$overall_mean_bss - featureless_birth$overall_mean_bss))
+message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                current_items_resid$overall_mean_bss,
+                current_items_resid$overall_mean_bss - featureless_current$overall_mean_bss))
+
+message("\nPersonality Models - Raw (No Age/Gender Control) - OPTIONAL:")
+message("\nDomains (5 Big Five):")
+message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                birth_domains_raw$overall_mean_bss,
+                birth_domains_raw$overall_mean_bss - featureless_birth$overall_mean_bss))
+message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                current_domains_raw$overall_mean_bss,
+                current_domains_raw$overall_mean_bss - featureless_current$overall_mean_bss))
+
+message("\nItems (188 personality items):")
+message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                birth_items_raw$overall_mean_bss,
+                birth_items_raw$overall_mean_bss - featureless_birth$overall_mean_bss))
+message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
+                current_items_raw$overall_mean_bss,
+                current_items_raw$overall_mean_bss - featureless_current$overall_mean_bss))
 
 # ============================================================================
 # VISUALIZATION 2: COMPREHENSIVE HEATMAP - ALL PREDICTORS × ALL CONDITIONS
