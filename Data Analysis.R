@@ -956,6 +956,248 @@ for (i in seq_along(items_list_birth_resid)) {
 
 message("\n" %+% strrep("=", 90) %+% "\n")
 
+# ============================================================================
+# VISUALIZATION 1: HISTOGRAM - MODEL PREDICTIVE ABILITY WITH CONFIDENCE INTERVALS
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("CREATING HISTOGRAM: Model Predictive Performance (ROC AUC with 95% CI)")
+message(strrep("=", 90))
+
+# Extract BSS values and compute confidence intervals for each model by settlement type
+# We'll use BSS as the performance metric (similar interpretation to AUC)
+
+compute_ci_bss <- function(bss_per_fold_matrix) {
+  # For each class, compute mean and 95% CI
+  # bss_per_fold_matrix: rows=folds, cols=settlement classes
+  
+  means <- colMeans(bss_per_fold_matrix, na.rm = TRUE)
+  ses <- apply(bss_per_fold_matrix, 2, function(col) {
+    sd(col, na.rm = TRUE) / sqrt(sum(!is.na(col)))
+  })
+  ci_lower <- means - 1.96 * ses
+  ci_upper <- means + 1.96 * ses
+  
+  return(list(means = means, ci_lower = ci_lower, ci_upper = ci_upper))
+}
+
+# Prepare data for histogram: BSS by model, settlement type, mover/stayer
+histogram_data <- data.frame()
+
+# For residualized models (primary analysis)
+models_to_plot <- list(
+  list(name = "Domains", current = current_domains_resid, birth = birth_domains_resid),
+  list(name = "Items", current = current_items_resid, birth = birth_items_resid)
+)
+
+for (model_set in models_to_plot) {
+  model_name <- model_set$name
+  current_model <- model_set$current
+  birth_model <- model_set$birth
+  
+  classes <- current_model$target_classes
+  
+  # Current residence - movers and stayers
+  current_movers_ci <- compute_ci_bss(current_model$bss_movers_per_fold)
+  current_stayers_ci <- compute_ci_bss(current_model$bss_stayers_per_fold)
+  
+  # Birth residence - movers and stayers
+  birth_movers_ci <- compute_ci_bss(birth_model$bss_movers_per_fold)
+  birth_stayers_ci <- compute_ci_bss(birth_model$bss_stayers_per_fold)
+  
+  # Add to data frame
+  for (class_idx in 1:length(classes)) {
+    class_name <- classes[class_idx]
+    
+    # Current - Movers
+    histogram_data <- rbind(histogram_data, data.frame(
+      Model = model_name,
+      Residence = "Current",
+      Group = "Mover",
+      Settlement = class_name,
+      Mean_BSS = current_movers_ci$means[class_idx],
+      CI_Lower = current_movers_ci$ci_lower[class_idx],
+      CI_Upper = current_movers_ci$ci_upper[class_idx]
+    ))
+    
+    # Current - Stayers
+    histogram_data <- rbind(histogram_data, data.frame(
+      Model = model_name,
+      Residence = "Current",
+      Group = "Stayer",
+      Settlement = class_name,
+      Mean_BSS = current_stayers_ci$means[class_idx],
+      CI_Lower = current_stayers_ci$ci_lower[class_idx],
+      CI_Upper = current_stayers_ci$ci_upper[class_idx]
+    ))
+    
+    # Birth - Movers
+    histogram_data <- rbind(histogram_data, data.frame(
+      Model = model_name,
+      Residence = "Birth",
+      Group = "Mover",
+      Settlement = class_name,
+      Mean_BSS = birth_movers_ci$means[class_idx],
+      CI_Lower = birth_movers_ci$ci_lower[class_idx],
+      CI_Upper = birth_movers_ci$ci_upper[class_idx]
+    ))
+    
+    # Birth - Stayers
+    histogram_data <- rbind(histogram_data, data.frame(
+      Model = model_name,
+      Residence = "Birth",
+      Group = "Stayer",
+      Settlement = class_name,
+      Mean_BSS = birth_stayers_ci$means[class_idx],
+      CI_Lower = birth_stayers_ci$ci_lower[class_idx],
+      CI_Upper = birth_stayers_ci$ci_upper[class_idx]
+    ))
+  }
+}
+
+# Create histogram with ggplot2
+p_histogram <- ggplot(histogram_data, aes(x = Settlement, y = Mean_BSS, 
+                                           fill = interaction(Residence, Group),
+                                           color = interaction(Residence, Group))) +
+  geom_bar(stat = "identity", position = position_dodge(0.8), width = 0.7, alpha = 0.8) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), 
+                position = position_dodge(0.8), width = 0.2, size = 0.5) +
+  facet_wrap(~ Model, nrow = 1) +
+  scale_fill_manual(values = c("Current.Mover" = "#1f77b4", "Current.Stayer" = "#aec7e8",
+                                "Birth.Mover" = "#ff7f0e", "Birth.Stayer" = "#ffbb78"),
+                    labels = c("Current.Mover" = "Current - Mover",
+                               "Current.Stayer" = "Current - Stayer",
+                               "Birth.Mover" = "Birth - Mover",
+                               "Birth.Stayer" = "Birth - Stayer")) +
+  scale_color_manual(values = c("Current.Mover" = "#1f77b4", "Current.Stayer" = "#aec7e8",
+                                 "Birth.Mover" = "#ff7f0e", "Birth.Stayer" = "#ffbb78"),
+                     labels = c("Current.Mover" = "Current - Mover",
+                                "Current.Stayer" = "Current - Stayer",
+                                "Birth.Mover" = "Birth - Mover",
+                                "Birth.Stayer" = "Birth - Stayer")) +
+  labs(title = "Model Predictive Ability by Settlement Type\n(Brier Skill Score with 95% CI, Age/Gender Residualized)",
+       x = "Settlement Type", y = "Brier Skill Score (BSS)", fill = "Model Type", color = "Model Type") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+    strip.text = element_text(face = "bold")
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray", size = 0.5)
+
+ggsave("histogram_model_performance.png", plot = p_histogram, width = 12, height = 6, dpi = 300)
+message("  Saved: histogram_model_performance.png")
+
+# ============================================================================
+# VISUALIZATION 2: COMPREHENSIVE HEATMAP - ALL PREDICTORS × ALL CONDITIONS
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("CREATING COMPREHENSIVE HEATMAP: All Predictors × All Conditions")
+message(strrep("=", 90))
+
+# Combine domains and filtered items for comprehensive heatmap
+predictor_names_combined <- c(
+  colnames(data)[4:8],  # Domains (O, C, E, A, N)
+  items_list_current_resid  # Top items that meet threshold
+)
+
+# Create comprehensive heatmap: rows=predictors, cols=settlement type × residence × group
+# We'll use average correlation across the two conditions
+
+# For current residence items (using current models)
+combined_current_pred <- cbind(
+  hm_current_domains_resid,  # 5 domains
+  hm_current_items_resid[items_for_main_current_resid, , drop = FALSE]  # Filtered items
+)
+
+# For birth residence items (using birth models)
+combined_birth_pred <- cbind(
+  hm_birth_domains_resid,
+  hm_birth_items_resid[items_for_main_birth_resid, , drop = FALSE]
+)
+
+# Create column labels with all combinations
+col_labels <- c()
+for (settlement in current_domains_resid$target_classes) {
+  for (residence in c("Birth", "Current")) {
+    for (group in c("Mover", "Stayer")) {
+      col_labels <- c(col_labels, paste0(settlement, "\n", residence, "\n", group))
+    }
+  }
+}
+
+# Combine all heatmap data
+# For each column combination, take the average correlation
+comprehensive_heatmap <- matrix(NA, nrow = nrow(combined_current_pred), 
+                                ncol = length(current_domains_resid$target_classes) * 2 * 2)
+colnames(comprehensive_heatmap) <- col_labels
+rownames(comprehensive_heatmap) <- c(colnames(data)[4:8], items_list_current_resid)
+
+col_idx <- 1
+for (settlement in current_domains_resid$target_classes) {
+  for (residence in c("Birth", "Current")) {
+    for (group in c("Mover", "Stayer")) {
+      # Select the appropriate heatmap and subset based on residence/group
+      if (residence == "Current") {
+        if (group == "Mover") {
+          hm_to_use <- combined_current_pred
+        } else {
+          hm_to_use <- combined_current_pred
+        }
+      } else {
+        if (group == "Mover") {
+          hm_to_use <- combined_birth_pred
+        } else {
+          hm_to_use <- combined_birth_pred
+        }
+      }
+      
+      # Fill in the correlation for this settlement
+      settlement_col <- which(colnames(hm_to_use) == settlement)
+      if (length(settlement_col) > 0) {
+        comprehensive_heatmap[, col_idx] <- hm_to_use[, settlement_col]
+      }
+      col_idx <- col_idx + 1
+    }
+  }
+}
+
+# Create comprehensive heatmap visualization
+hm_melted_comp <- melt(comprehensive_heatmap)
+colnames(hm_melted_comp) <- c("Predictor", "Condition", "Correlation")
+
+p_comprehensive <- ggplot(hm_melted_comp, aes(x = Condition, y = Predictor, fill = Correlation)) +
+  geom_tile(color = "white", size = 0.3) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
+                       midpoint = 0, limits = c(-0.3, 0.3), name = "Correlation") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+    plot.margin = margin(10, 10, 10, 200)
+  ) +
+  labs(title = "Comprehensive Predictor Map: Domains & Items × Settlement Type × Residence × Migration Group\n(Age/Gender Residualized)",
+       x = "Settlement Type / Residence Type / Migration Group",
+       y = "Personality Predictor")
+
+ggsave("heatmap_comprehensive_all_conditions.png", plot = p_comprehensive, 
+       width = 14, height = 16, dpi = 300)
+message("  Saved: heatmap_comprehensive_all_conditions.png")
+
+# Save comprehensive heatmap data
+saveRDS(list(
+  heatmap = comprehensive_heatmap,
+  predictor_names = rownames(comprehensive_heatmap),
+  condition_labels = col_labels,
+  label = "comprehensive_all_conditions"
+), file = "heatmap_comprehensive_all_conditions.rds")
+
+message("\n" %+% strrep("=", 90) %+% "\n")
+
 
 
 
