@@ -215,15 +215,14 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     train_idx <- fold_indices[[i]]$train
     test_idx <- fold_indices[[i]]$test
     
-    # Clone the task for this fold
-    task_train <- task$clone()$filter(train_idx)
-    task_test <- task$clone()$filter(test_idx)
-    
     # 5a. IF residualizing, fit residualization model on TRAINING data only
     if (residualize) {
       # Get training data with all columns
       train_data_full <- analysis_data %>% slice(train_idx)
       test_data_full <- analysis_data %>% slice(test_idx)
+
+      train_task_data <- task_data %>% slice(train_idx)
+      test_task_data <- task_data %>% slice(test_idx)
       
       # Fit lm models on training data
       for (col in pred_cols) {
@@ -239,10 +238,24 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
         test_pred <- predict(lm_fit, newdata = test_data_full)
         test_residuals <- test_data_full[[col]] - test_pred
         
-        # Update task data with residualized values
-        task_train$data()[[col]] <- train_residuals
-        task_test$data()[[col]] <- test_residuals
+        # Store residualized values in fold-specific task data
+        train_task_data[[col]] <- train_residuals
+        test_task_data[[col]] <- test_residuals
       }
+
+      task_train <- as_task_classif(
+        train_task_data,
+        target = "target",
+        id = paste0(label, "_train_", i)
+      )
+      task_test <- as_task_classif(
+        test_task_data,
+        target = "target",
+        id = paste0(label, "_test_", i)
+      )
+    } else {
+      task_train <- task$clone()$filter(train_idx)
+      task_test <- task$clone()$filter(test_idx)
     }
     
     # Train on training set
@@ -1490,7 +1503,6 @@ saveRDS(list(
 ), file = "heatmap_comprehensive_all_conditions.rds")
 
 message("\n" %+% strrep("=", 90) %+% "\n")
-
 
 
 
