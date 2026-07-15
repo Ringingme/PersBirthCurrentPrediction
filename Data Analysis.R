@@ -98,7 +98,34 @@ calculate_bss <- function(actual, predicted_probs, positive_class) {
   return(bss)
 }
 
-# 2. Nadeau & Bengio (2003) Significance Test
+# 2. Complementary multiclass metrics
+# Brier score and log loss evaluate probabilities; accuracy and balanced accuracy
+# evaluate the most probable class. Lower is better for Brier score and log loss.
+calculate_multiclass_metrics <- function(actual, predicted_probs, target_classes) {
+  actual <- as.character(actual)
+  predicted_probs <- predicted_probs[, target_classes, drop = FALSE]
+  class_index <- match(actual, target_classes)
+  if (anyNA(class_index)) stop("Observed outcomes and probability columns do not match")
+
+  observed_matrix <- matrix(0, nrow = length(actual), ncol = length(target_classes))
+  observed_matrix[cbind(seq_along(actual), class_index)] <- 1
+  clipped_probs <- pmin(pmax(predicted_probs, 1e-15), 1 - 1e-15)
+  predicted_class <- target_classes[max.col(predicted_probs, ties.method = "first")]
+  class_recall <- vapply(target_classes, function(class) {
+    class_rows <- actual == class
+    if (!any(class_rows)) return(NA_real_)
+    mean(predicted_class[class_rows] == class)
+  }, numeric(1))
+
+  c(
+    multiclass_brier = mean(rowSums((predicted_probs - observed_matrix)^2)),
+    log_loss = -mean(log(clipped_probs[cbind(seq_along(actual), class_index)])),
+    accuracy = mean(predicted_class == actual),
+    balanced_accuracy = mean(class_recall, na.rm = TRUE)
+  )
+}
+
+# 3. Nadeau & Bengio (2003) Significance Test
 # Tests if two paired models are significantly different
 # Input: two vectors of multiclass BSS scores from same folds
 # For multiclass, we average across classes, then compare the fold-wise averages
@@ -149,7 +176,7 @@ nadeau_bengio_test <- function(bss_matrix1, bss_matrix2, folds = 5) {
   ))
 }
 
-# 3. Evaluate model on subset (movers or stayers)
+# 4. Evaluate model on subset (movers or stayers)
 # subset_mask: logical vector indicating which samples belong to the subset
 evaluate_on_subset <- function(predictions, true_outcomes, subset_mask, target_classes) {
   subset_pred <- predictions[subset_mask, ]
@@ -207,6 +234,13 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     stop("fold_indices must be provided to ensure identical folds across all models")
   }
   n_folds <- length(fold_indices)
+  expected_rows <- max(unlist(lapply(fold_indices, function(x) c(x$train, x$test))))
+  if (nrow(analysis_data) != expected_rows) {
+    stop(
+      "Model cohort does not match the common birth/current resampling cohort; ",
+      "check missing outcomes and covariates before comparing models"
+    )
+  }
   
   # 4. Build a nested elastic-net tuner. A fresh AutoTuner is created for every
   # outer fold below. Lambda is tuned on a log scale because useful penalties
@@ -304,6 +338,7 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     bss_per_class <- sapply(target_classes, function(class) {
       calculate_bss(true_outcomes, pred_probs[, class], class)
     })
+    fold_metrics <- calculate_multiclass_metrics(true_outcomes, pred_probs, target_classes)
     
     # Store results
     all_fold_results[[i]] <- list(
@@ -314,6 +349,7 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       pred_probs = pred_probs,
       bss_per_class = bss_per_class,
       mean_bss = mean(bss_per_class),
+      metrics = fold_metrics,
       tuned_params = learner$tuning_instance$result_learner_param_vals
     )
 
@@ -324,6 +360,8 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   all_bss_values <- do.call(rbind, lapply(all_fold_results, function(x) x$bss_per_class))
   mean_bss_per_class <- colMeans(all_bss_values)
   overall_mean_bss <- mean(all_bss_values)
+  all_fold_metrics <- do.call(rbind, lapply(all_fold_results, function(x) x$metrics))
+  mean_metrics <- colMeans(all_fold_metrics, na.rm = TRUE)
   
   # 7. Combine all predictions and outcomes for subset evaluation
   all_true <- unlist(lapply(all_fold_results, function(x) x$true_outcomes))
@@ -382,6 +420,8 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     mean_bss_per_class = mean_bss_per_class,
     overall_mean_bss = overall_mean_bss,
     all_bss_values = all_bss_values,
+    all_fold_metrics = all_fold_metrics,
+    mean_metrics = mean_metrics,
     bss_movers = bss_movers,
     bss_stayers = bss_stayers,
     bss_movers_per_fold = bss_movers_per_fold,
@@ -413,19 +453,26 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
 # IMPORTANT: Instantiate ONCE on a reference task, then reuse indices for all models
 set.seed(42)
 
-# Create reference task for stratification (use birth_residence_types as reference)
-# We'll instantiate the resampling on this, then reuse the fold indices for all models
+# Create a common reference cohort and stratify jointly on both outcomes. mlr3
+# treats every birth/current combination as a stratum, so the same paired folds
+# preserve the proportions of both outcomes as closely as their counts allow.
 analysis_data_ref <- data %>%
-  select(all_of(c(colnames(data)[4:8], "gender", "ageAtAgreement", "birth_residence_types", 
-                  "currentResidenceType2", "birthResidenceType"))) %>%
-  drop_na(birth_residence_types, gender, ageAtAgreement)
+  select(all_of(c(
+    colnames(data)[4:8], "gender", "ageAtAgreement",
+    "birth_residence_types", "current_residence_types",
+    "currentResidenceType2", "birthResidenceType"
+  ))) %>%
+  drop_na(birth_residence_types, current_residence_types, gender, ageAtAgreement)
 
 task_ref <- as_task_classif(
-  analysis_data_ref %>% select(all_of(c(colnames(data)[4:8], "birth_residence_types"))) %>% rename(target = birth_residence_types),
+  analysis_data_ref %>%
+    select(all_of(c(colnames(data)[4:8], "birth_residence_types", "current_residence_types"))) %>%
+    rename(target = birth_residence_types, current_stratum = current_residence_types),
   target = "target",
   id = "reference_for_resampling"
 )
-task_ref$col_roles$stratum <- "target"
+task_ref$set_col_roles("current_stratum", roles = "stratum")
+task_ref$col_roles$stratum <- c("target", "current_stratum")
 
 # Instantiate the resampling object ONCE on the reference task
 shared_resampling <- rsmp("repeated_cv", folds = 5, repeats = 10)
@@ -440,7 +487,7 @@ for (i in 1:shared_resampling$iters) {
   )
 }
 
-message("Resampling object instantiated ONCE on reference task (birth_residence_types)")
+message("Resampling instantiated once with joint birth/current stratification")
 message(sprintf("Stored %d fold indices for reuse across all models", length(stored_fold_indices)))
 
 message("\n" %+% strrep("=", 90))
@@ -534,6 +581,10 @@ featureless_baseline <- function(outcome_var, fold_indices, data_full) {
     stop("fold_indices must be provided to ensure identical folds across all models")
   }
   n_folds <- length(fold_indices)
+  expected_rows <- max(unlist(lapply(fold_indices, function(x) c(x$train, x$test))))
+  if (nrow(analysis_data) != expected_rows) {
+    stop("Featureless model cohort does not match the common resampling cohort")
+  }
   
   all_fold_results <- list()
   
@@ -562,6 +613,7 @@ featureless_baseline <- function(outcome_var, fold_indices, data_full) {
     bss_per_class <- sapply(target_classes, function(class) {
       calculate_bss(true_outcomes, pred_probs[, class], class)
     })
+    fold_metrics <- calculate_multiclass_metrics(true_outcomes, pred_probs, target_classes)
     
     # Store results
     all_fold_results[[i]] <- list(
@@ -572,6 +624,7 @@ featureless_baseline <- function(outcome_var, fold_indices, data_full) {
       pred_probs = pred_probs,
       bss_per_class = bss_per_class,
       mean_bss = mean(bss_per_class),
+      metrics = fold_metrics,
       base_rates = base_rates
     )
   }
@@ -580,6 +633,8 @@ featureless_baseline <- function(outcome_var, fold_indices, data_full) {
   all_bss_values <- do.call(rbind, lapply(all_fold_results, function(x) x$bss_per_class))
   mean_bss_per_class <- colMeans(all_bss_values)
   overall_mean_bss <- mean(all_bss_values)
+  all_fold_metrics <- do.call(rbind, lapply(all_fold_results, function(x) x$metrics))
+  mean_metrics <- colMeans(all_fold_metrics, na.rm = TRUE)
   
   # 7. Combine all predictions and outcomes
   all_true <- unlist(lapply(all_fold_results, function(x) x$true_outcomes))
@@ -636,6 +691,8 @@ featureless_baseline <- function(outcome_var, fold_indices, data_full) {
     mean_bss_per_class = mean_bss_per_class,
     overall_mean_bss = overall_mean_bss,
     all_bss_values = all_bss_values,
+    all_fold_metrics = all_fold_metrics,
+    mean_metrics = mean_metrics,
     bss_movers = bss_movers,
     bss_stayers = bss_stayers,
     bss_movers_per_fold = bss_movers_per_fold,
@@ -667,6 +724,18 @@ saveRDS(featureless_current, file = "featureless_current.rds")
 message("\nFeatureless Baseline BSS Summary:")
 message(sprintf("  Birth Residence: Overall BSS = %.4f", featureless_birth$overall_mean_bss))
 message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
+
+# Save complementary probability and classification metrics for the primary models.
+primary_metrics_summary <- bind_rows(
+  data.frame(Model = "Featureless", Outcome = "Birth", as.list(featureless_birth$mean_metrics)),
+  data.frame(Model = "Domains", Outcome = "Birth", as.list(birth_domains_resid$mean_metrics)),
+  data.frame(Model = "Items", Outcome = "Birth", as.list(birth_items_resid$mean_metrics)),
+  data.frame(Model = "Featureless", Outcome = "Current", as.list(featureless_current$mean_metrics)),
+  data.frame(Model = "Domains", Outcome = "Current", as.list(current_domains_resid$mean_metrics)),
+  data.frame(Model = "Items", Outcome = "Current", as.list(current_items_resid$mean_metrics))
+)
+write.csv(primary_metrics_summary, "primary_model_metrics.csv", row.names = FALSE)
+message("Saved complementary metrics: primary_model_metrics.csv")
 
 # ============================================================================
 # OPTIONAL: RAW MODELS (Non-residualized for comparison)
