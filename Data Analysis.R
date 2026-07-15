@@ -1306,140 +1306,180 @@ for (i in seq_along(items_list_birth_resid)) {
 message("\n" %+% strrep("=", 90) %+% "\n")
 
 # ============================================================================
-# VISUALIZATION 1: HISTOGRAM - MODEL PREDICTIVE ABILITY WITH CONFIDENCE INTERVALS
+# VISUALIZATION 1: OVERALL BSS BY MODEL WITH CORRECTED CONFIDENCE INTERVALS
 # ============================================================================
 
 message("\n" %+% strrep("=", 90))
-message("CREATING HISTOGRAM: Model Predictive Performance (ROC AUC with 95% CI)")
+message("CREATING HISTOGRAM: Overall BSS by Model (Corrected 95% CI)")
 message(strrep("=", 90))
 
-# Extract BSS values and compute confidence intervals for each model by settlement type
-# We'll use BSS as the performance metric (similar interpretation to AUC)
+# Calculate one macro-average BSS per outer fold, then account for dependence
+# between repeated-CV estimates using the Nadeau-Bengio variance correction.
+overall_bss_summary <- function(model_object, model_name, residence, folds = 5) {
+  fold_bss <- rowMeans(model_object$all_bss_values)
+  fold_bss <- fold_bss[is.finite(fold_bss)]
+  n <- length(fold_bss)
+  if (n < 2) stop("At least two finite outer-fold BSS values are required")
 
-compute_ci_bss <- function(bss_per_fold_matrix) {
-  # For each class, compute mean and 95% CI
-  # bss_per_fold_matrix: rows=folds, cols=settlement classes
-  
-  means <- colMeans(bss_per_fold_matrix, na.rm = TRUE)
-  ses <- apply(bss_per_fold_matrix, 2, function(col) {
-    sd(col, na.rm = TRUE) / sqrt(sum(!is.na(col)))
-  })
-  ci_lower <- means - 1.96 * ses
-  ci_upper <- means + 1.96 * ses
-  
-  return(list(means = means, ci_lower = ci_lower, ci_upper = ci_upper))
+  corrected_se <- sqrt((1 / n + 1 / (folds - 1)) * var(fold_bss))
+  critical_t <- qt(0.975, df = n - 1)
+
+  data.frame(
+    Model = model_name,
+    Residence = residence,
+    Mean_BSS = mean(fold_bss),
+    Corrected_SE = corrected_se,
+    CI_Lower = mean(fold_bss) - critical_t * corrected_se,
+    CI_Upper = mean(fold_bss) + critical_t * corrected_se,
+    Outer_Folds = n
+  )
 }
 
-# Prepare data for histogram: BSS by model, settlement type, mover/stayer
-histogram_data <- data.frame()
+overall_bss_plot_data <- bind_rows(
+  overall_bss_summary(featureless_birth, "Featureless", "Birth"),
+  overall_bss_summary(birth_domains_resid, "Domains", "Birth"),
+  overall_bss_summary(birth_items_resid, "Items", "Birth"),
+  overall_bss_summary(featureless_current, "Featureless", "Current"),
+  overall_bss_summary(current_domains_resid, "Domains", "Current"),
+  overall_bss_summary(current_items_resid, "Items", "Current")
+) %>%
+  mutate(
+    Model = factor(Model, levels = c("Featureless", "Domains", "Items")),
+    Residence = factor(Residence, levels = c("Birth", "Current"))
+  )
 
-# For residualized models (primary analysis) + featureless baseline
-models_to_plot <- list(
-  list(name = "Featureless", current = featureless_current, birth = featureless_birth),
-  list(name = "Domains", current = current_domains_resid, birth = birth_domains_resid),
-  list(name = "Items", current = current_items_resid, birth = birth_items_resid)
-)
-
-for (model_set in models_to_plot) {
-  model_name <- model_set$name
-  current_model <- model_set$current
-  birth_model <- model_set$birth
-  
-  classes <- current_model$target_classes
-  
-  # Current residence - movers and stayers
-  current_movers_ci <- compute_ci_bss(current_model$bss_movers_per_fold)
-  current_stayers_ci <- compute_ci_bss(current_model$bss_stayers_per_fold)
-  
-  # Birth residence - movers and stayers
-  birth_movers_ci <- compute_ci_bss(birth_model$bss_movers_per_fold)
-  birth_stayers_ci <- compute_ci_bss(birth_model$bss_stayers_per_fold)
-  
-  # Add to data frame
-  for (class_idx in 1:length(classes)) {
-    class_name <- classes[class_idx]
-    
-    # Current - Movers
-    histogram_data <- rbind(histogram_data, data.frame(
-      Model = model_name,
-      Residence = "Current",
-      Group = "Mover",
-      Settlement = class_name,
-      Mean_BSS = current_movers_ci$means[class_idx],
-      CI_Lower = current_movers_ci$ci_lower[class_idx],
-      CI_Upper = current_movers_ci$ci_upper[class_idx]
-    ))
-    
-    # Current - Stayers
-    histogram_data <- rbind(histogram_data, data.frame(
-      Model = model_name,
-      Residence = "Current",
-      Group = "Stayer",
-      Settlement = class_name,
-      Mean_BSS = current_stayers_ci$means[class_idx],
-      CI_Lower = current_stayers_ci$ci_lower[class_idx],
-      CI_Upper = current_stayers_ci$ci_upper[class_idx]
-    ))
-    
-    # Birth - Movers
-    histogram_data <- rbind(histogram_data, data.frame(
-      Model = model_name,
-      Residence = "Birth",
-      Group = "Mover",
-      Settlement = class_name,
-      Mean_BSS = birth_movers_ci$means[class_idx],
-      CI_Lower = birth_movers_ci$ci_lower[class_idx],
-      CI_Upper = birth_movers_ci$ci_upper[class_idx]
-    ))
-    
-    # Birth - Stayers
-    histogram_data <- rbind(histogram_data, data.frame(
-      Model = model_name,
-      Residence = "Birth",
-      Group = "Stayer",
-      Settlement = class_name,
-      Mean_BSS = birth_stayers_ci$means[class_idx],
-      CI_Lower = birth_stayers_ci$ci_lower[class_idx],
-      CI_Upper = birth_stayers_ci$ci_upper[class_idx]
-    ))
-  }
-}
-
-# Create histogram with ggplot2
-p_histogram <- ggplot(histogram_data, aes(x = Settlement, y = Mean_BSS, 
-                                           fill = interaction(Residence, Group),
-                                           color = interaction(Residence, Group))) +
-  geom_bar(stat = "identity", position = position_dodge(0.8), width = 0.7, alpha = 0.8) +
-  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), 
-                position = position_dodge(0.8), width = 0.2, size = 0.5) +
-  facet_wrap(~ Model, nrow = 1) +
-  scale_fill_manual(values = c("Current.Mover" = "#1f77b4", "Current.Stayer" = "#aec7e8",
-                                "Birth.Mover" = "#ff7f0e", "Birth.Stayer" = "#ffbb78"),
-                    labels = c("Current.Mover" = "Current - Mover",
-                               "Current.Stayer" = "Current - Stayer",
-                               "Birth.Mover" = "Birth - Mover",
-                               "Birth.Stayer" = "Birth - Stayer")) +
-  scale_color_manual(values = c("Current.Mover" = "#1f77b4", "Current.Stayer" = "#aec7e8",
-                                 "Birth.Mover" = "#ff7f0e", "Birth.Stayer" = "#ffbb78"),
-                     labels = c("Current.Mover" = "Current - Mover",
-                                "Current.Stayer" = "Current - Stayer",
-                                "Birth.Mover" = "Birth - Mover",
-                                "Birth.Stayer" = "Birth - Stayer")) +
-  labs(title = "Model Predictive Ability by Settlement Type\n(Brier Skill Score with 95% CI, Including Featureless Baseline)",
-       x = "Settlement Type", y = "Brier Skill Score (BSS)", fill = "Model Type", color = "Model Type") +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom",
-    plot.title = element_text(hjust = 0.5, size = 11, face = "bold"),
-    strip.text = element_text(face = "bold")
+p_overall_bss <- ggplot(
+  overall_bss_plot_data,
+  aes(x = Model, y = Mean_BSS, fill = Residence)
+) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(
+    aes(ymin = CI_Lower, ymax = CI_Upper),
+    position = position_dodge(width = 0.8),
+    width = 0.2
   ) +
-  geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 0.3) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red", size = 0.5, alpha = 0.5) +
-  annotate("text", x = Inf, y = 0.5, label = "BSS = 0.5 threshold", hjust = 1.1, vjust = -0.5, size = 3, color = "red")
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
+  scale_fill_manual(values = c(Birth = "#E69F00", Current = "#0072B2")) +
+  labs(
+    title = "Overall Predictive Performance by Model",
+    subtitle = "Macro-averaged Brier Skill Score with corrected 95% confidence intervals",
+    x = "Model",
+    y = "Overall Brier Skill Score",
+    fill = "Outcome"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
 
-ggsave("histogram_model_performance.png", plot = p_histogram, width = 14, height = 6, dpi = 300)
-message("  Saved: histogram_model_performance.png")
+ggsave(
+  "histogram_overall_bss_with_ci.png",
+  plot = p_overall_bss,
+  width = 9,
+  height = 6,
+  dpi = 300
+)
+write.csv(overall_bss_plot_data, "histogram_overall_bss_with_ci.csv", row.names = FALSE)
+message("  Saved: histogram_overall_bss_with_ci.png")
+message("  Saved: histogram_overall_bss_with_ci.csv")
+
+# ============================================================================
+# VISUALIZATION 2: CLASS-SPECIFIC BSS BY OUTCOME AND MODEL
+# ============================================================================
+
+message("\n" %+% strrep("=", 90))
+message("CREATING HISTOGRAM: BSS for 2 Outcomes x 7 Residence Types")
+message(strrep("=", 90))
+
+# Summarize each class from the 50 outer-fold BSS values. The correction accounts
+# for dependence caused by overlapping training sets in repeated 5-fold CV.
+class_bss_summary <- function(model_object, model_name, residence, folds = 5) {
+  bind_rows(lapply(seq_along(model_object$target_classes), function(class_idx) {
+    fold_bss <- model_object$all_bss_values[, class_idx]
+    fold_bss <- fold_bss[is.finite(fold_bss)]
+    n <- length(fold_bss)
+    if (n < 2) stop("At least two finite outer-fold BSS values are required per class")
+
+    corrected_se <- sqrt((1 / n + 1 / (folds - 1)) * var(fold_bss))
+    critical_t <- qt(0.975, df = n - 1)
+
+    data.frame(
+      Residence = residence,
+      Residence_Type = model_object$target_classes[class_idx],
+      Model = model_name,
+      Mean_BSS = mean(fold_bss),
+      Corrected_SE = corrected_se,
+      CI_Lower = mean(fold_bss) - critical_t * corrected_se,
+      CI_Upper = mean(fold_bss) + critical_t * corrected_se,
+      Outer_Folds = n
+    )
+  }))
+}
+
+class_bss_plot_data <- bind_rows(
+  class_bss_summary(featureless_birth, "Featureless", "Birth"),
+  class_bss_summary(birth_domains_resid, "Domains", "Birth"),
+  class_bss_summary(birth_items_resid, "Items", "Birth"),
+  class_bss_summary(featureless_current, "Featureless", "Current"),
+  class_bss_summary(current_domains_resid, "Domains", "Current"),
+  class_bss_summary(current_items_resid, "Items", "Current")
+) %>%
+  mutate(
+    Model = factor(Model, levels = c("Featureless", "Domains", "Items")),
+    Residence = factor(Residence, levels = c("Birth", "Current")),
+    Residence_Type = factor(Residence_Type, levels = unique(Residence_Type))
+  )
+
+dodge_models <- position_dodge(width = 0.8)
+p_class_bss <- ggplot(
+  class_bss_plot_data,
+  aes(x = Residence_Type, y = Mean_BSS, fill = Model)
+) +
+  geom_col(position = dodge_models, width = 0.7) +
+  geom_errorbar(
+    aes(ymin = CI_Lower, ymax = CI_Upper),
+    position = dodge_models,
+    width = 0.2
+  ) +
+  facet_wrap(~ Residence, ncol = 1, scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
+  scale_fill_manual(values = c(
+    Featureless = "#999999",
+    Domains = "#0072B2",
+    Items = "#D55E00"
+  )) +
+  labs(
+    title = "Predictive Performance Across Birth and Current Residence Types",
+    subtitle = "Brier Skill Score with corrected 95% confidence intervals",
+    x = "Residence type",
+    y = "Brier Skill Score",
+    fill = "Model"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave(
+  "histogram_bss_by_residence_type_with_ci.png",
+  plot = p_class_bss,
+  width = 13,
+  height = 9,
+  dpi = 300
+)
+write.csv(
+  class_bss_plot_data,
+  "histogram_bss_by_residence_type_with_ci.csv",
+  row.names = FALSE
+)
+message("  Saved: histogram_bss_by_residence_type_with_ci.png")
+message("  Saved: histogram_bss_by_residence_type_with_ci.csv")
 
 # Summary: Featureless baseline vs personality models
 message("\n" %+% strrep("=", 90))
