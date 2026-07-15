@@ -201,7 +201,7 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   graph <- po("imputemean") %>>% 
     po("imputeoor") %>>%
     po("encode", method = "treatment") %>>%
-    lrn("classif.multinom", predict_type = "prob")
+    lrn("classif.multinom", predict_type = "prob", MaxNWts = 10000)
   
   learner <- as_learner(graph)
   learner$id <- paste0("MultinomReg_", label)
@@ -887,7 +887,7 @@ extract_heatmap_data <- function(model_object, pred_cols, label, data) {
   graph <- po("imputemean") %>>% 
     po("imputeoor") %>>%
     po("encode", method = "treatment") %>>%
-    lrn("classif.multinom", predict_type = "prob")
+    lrn("classif.multinom", predict_type = "prob", MaxNWts = 10000)
   
   learner <- as_learner(graph)
   learner$train(task_full)
@@ -1503,7 +1503,6 @@ saveRDS(list(
 ), file = "heatmap_comprehensive_all_conditions.rds")
 
 message("\n" %+% strrep("=", 90) %+% "\n")
-
 
 
 
