@@ -1429,33 +1429,84 @@ class_bss_plot_data <- bind_rows(
   mutate(
     Model = factor(Model, levels = c("Featureless", "Domains", "Items")),
     Residence = factor(Residence, levels = c("Birth", "Current")),
-    Residence_Type = factor(Residence_Type, levels = unique(Residence_Type))
+    Type_Label = case_when(
+      str_starts(Residence_Type, "stayer_") ~ paste("Stayer:", str_to_title(str_remove(Residence_Type, "stayer_"))),
+      str_starts(Residence_Type, "born_") ~ paste("Mover:", str_to_title(str_remove(Residence_Type, "born_"))),
+      str_starts(Residence_Type, "current_") ~ paste("Mover:", str_to_title(str_remove(Residence_Type, "current_"))),
+      TRUE ~ Residence_Type
+    )
   )
 
-dodge_models <- position_dodge(width = 0.8)
-p_class_bss <- ggplot(
-  class_bss_plot_data,
-  aes(x = Residence_Type, y = Mean_BSS, fill = Model)
-) +
-  geom_col(position = dodge_models, width = 0.7) +
-  geom_errorbar(
-    aes(ymin = CI_Lower, ymax = CI_Upper),
-    position = dodge_models,
-    width = 0.2
+type_levels <- c(
+  "Stayer: Village", "Stayer: Town", "Stayer: City",
+  "Mover: Village", "Mover: Town", "Mover: City", "Mover: Abroad"
+)
+
+featureless_by_class <- class_bss_plot_data %>%
+  filter(Model == "Featureless") %>%
+  select(Residence, Residence_Type, Featureless_BSS = Mean_BSS)
+
+trained_bss_plot_data <- class_bss_plot_data %>%
+  filter(Model %in% c("Domains", "Items")) %>%
+  left_join(featureless_by_class, by = c("Residence", "Residence_Type")) %>%
+  mutate(
+    Class_Index = match(Type_Label, type_levels),
+    X = Class_Index + if_else(Model == "Domains", -0.2, 0.2),
+    Xmin = X - 0.17,
+    Xmax = X + 0.17
+  )
+
+# Each trained bar is split into the featureless baseline and the model's change
+# from that baseline. geom_rect is used instead of ordinary stacking so losses
+# below the baseline are represented correctly, including when either BSS is negative.
+class_bss_segments <- bind_rows(
+  trained_bss_plot_data %>%
+    transmute(
+      Residence, Residence_Type, Type_Label, Model, Xmin, Xmax,
+      Segment = "Featureless baseline",
+      Ymin = pmin(0, Featureless_BSS),
+      Ymax = pmax(0, Featureless_BSS)
+    ),
+  trained_bss_plot_data %>%
+    transmute(
+      Residence, Residence_Type, Type_Label, Model, Xmin, Xmax,
+      Segment = if_else(Model == "Domains", "Domains gain/loss", "Items gain/loss"),
+      Ymin = pmin(Featureless_BSS, Mean_BSS),
+      Ymax = pmax(Featureless_BSS, Mean_BSS)
+    )
+)
+
+p_class_bss <- ggplot() +
+  geom_rect(
+    data = class_bss_segments,
+    aes(xmin = Xmin, xmax = Xmax, ymin = Ymin, ymax = Ymax, fill = Segment, color = Model),
+    linewidth = 0.25
   ) +
-  facet_wrap(~ Residence, ncol = 1, scales = "free_x") +
+  geom_errorbar(
+    data = trained_bss_plot_data,
+    aes(x = X, ymin = CI_Lower, ymax = CI_Upper, color = Model),
+    width = 0.12,
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ Residence, ncol = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
   scale_fill_manual(values = c(
-    Featureless = "#999999",
+    "Featureless baseline" = "#B3B3B3",
+    "Domains gain/loss" = "#56B4E9",
+    "Items gain/loss" = "#E69F00"
+  )) +
+  scale_color_manual(values = c(
     Domains = "#0072B2",
     Items = "#D55E00"
   )) +
+  scale_x_continuous(breaks = seq_along(type_levels), labels = type_levels) +
   labs(
     title = "Predictive Performance Across Birth and Current Residence Types",
-    subtitle = "Brier Skill Score with corrected 95% confidence intervals",
+    subtitle = "Featureless baseline plus model gain/loss; capped lines show corrected 95% CIs",
     x = "Residence type",
     y = "Brier Skill Score",
-    fill = "Model"
+    fill = "Bar segment",
+    color = "Trained model"
   ) +
   theme_minimal(base_size = 11) +
   theme(
@@ -1474,7 +1525,7 @@ ggsave(
   dpi = 300
 )
 write.csv(
-  class_bss_plot_data,
+  trained_bss_plot_data,
   "histogram_bss_by_residence_type_with_ci.csv",
   row.names = FALSE
 )
