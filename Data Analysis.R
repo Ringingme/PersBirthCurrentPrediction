@@ -195,12 +195,13 @@ evaluate_on_subset <- function(predictions, true_outcomes, subset_mask, target_c
 # ============================================================================
 # Outer resampling: repeated stratified CV (5 folds x 10 repeats), shared by all
 # models. Inner resampling: 5-fold CV on each outer training set. The inner loop
-# tunes alpha and s (the lambda used for prediction by glmnet), so the outer test
-# data are never used for model selection.
+# tunes alpha; classif.cv_glmnet selects lambda internally within each fit. The
+# outer test data are never used for either hyperparameter selection.
 
 unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label, 
                           fold_indices = NULL, inner_folds = 5,
-                          tuning_evals = 30, tuning_seed = 42) {
+                          alpha_grid_resolution = 11,
+                          internal_lambda_folds = 5, tuning_seed = 42) {
   
   message(paste0("\n=== Running unified model: ", label, " ==="))
   
@@ -242,15 +243,17 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     )
   }
   
-  # 4. Build a nested elastic-net tuner. A fresh AutoTuner is created for every
-  # outer fold below. Lambda is tuned on a log scale because useful penalties
-  # commonly span several orders of magnitude.
+  # 4. Build a nested elastic-net tuner. The explicit mlr3 inner resampling
+  # selects alpha. Within every candidate fit, cv.glmnet selects lambda using
+  # its own CV and the one-standard-error rule. Outer test data remain untouched.
   make_learner <- function() {
     elastic_net <- lrn(
-      "classif.glmnet",
+      "classif.cv_glmnet",
       predict_type = "prob",
       alpha = to_tune(0, 1),
-      s = to_tune(1e-4, 1, logscale = TRUE),
+      nfolds = internal_lambda_folds,
+      s = "lambda.1se",
+      type.measure = "deviance",
       standardize = TRUE,
       type.multinomial = "grouped"
     )
@@ -261,11 +264,11 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       elastic_net
 
     auto_tuner(
-      tuner = tnr("random_search"),
+      tuner = tnr("grid_search", resolution = alpha_grid_resolution),
       learner = as_learner(graph),
       resampling = rsmp("cv", folds = inner_folds),
       measure = msr("classif.logloss"),
-      terminator = trm("evals", n_evals = tuning_evals)
+      terminator = trm("none")
     )
   }
   
@@ -429,13 +432,14 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     all_fold_results = all_fold_results,
     tuned_params = lapply(all_fold_results, function(x) x$tuned_params),
     tuning = list(
-      learner = "classif.glmnet",
-      parameters = c("alpha", "s"),
-      lambda_range = c(1e-4, 1),
+      learner = "classif.cv_glmnet",
+      parameters = "alpha",
+      alpha_grid_resolution = alpha_grid_resolution,
       inner_folds = inner_folds,
-      tuning_evals = tuning_evals,
+      lambda_selection = "internal cv.glmnet, lambda.1se",
+      internal_lambda_folds = internal_lambda_folds,
       measure = "classif.logloss",
-      tuner = "random_search"
+      tuner = "grid_search"
     ),
     target_classes = target_classes,
     all_pred_probs = all_pred,
