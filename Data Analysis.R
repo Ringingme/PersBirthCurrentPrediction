@@ -125,7 +125,36 @@ calculate_multiclass_metrics <- function(actual, predicted_probs, target_classes
   )
 }
 
-# 3. Nadeau & Bengio (2003) Significance Test
+# 3. Extract class-specific coefficients from a fitted cv.glmnet AutoTuner
+extract_elastic_net_coefficients <- function(auto_tuner_model, pred_cols, target_classes) {
+  base_learner <- auto_tuner_model$base_learner(recursive = Inf)
+  coefficient_list <- coef(base_learner$model, s = "lambda.1se")
+
+  missing_classes <- setdiff(target_classes, names(coefficient_list))
+  if (length(missing_classes) > 0) {
+    stop("Missing coefficient matrices for classes: ", paste(missing_classes, collapse = ", "))
+  }
+
+  coefficient_matrix <- matrix(
+    0,
+    nrow = length(pred_cols),
+    ncol = length(target_classes),
+    dimnames = list(pred_cols, target_classes)
+  )
+
+  for (class in target_classes) {
+    class_coefficients <- as.matrix(coefficient_list[[class]])[, 1]
+    missing_predictors <- setdiff(pred_cols, names(class_coefficients))
+    if (length(missing_predictors) > 0) {
+      stop("Missing coefficients for predictors: ", paste(missing_predictors, collapse = ", "))
+    }
+    coefficient_matrix[, class] <- class_coefficients[pred_cols]
+  }
+
+  coefficient_matrix
+}
+
+# 4. Nadeau & Bengio (2003) Significance Test
 # Tests if two paired models are significantly different
 # Input: two vectors of multiclass BSS scores from same folds
 # For multiclass, we average across classes, then compare the fold-wise averages
@@ -176,7 +205,7 @@ nadeau_bengio_test <- function(bss_matrix1, bss_matrix2, folds = 5) {
   ))
 }
 
-# 4. Evaluate model on subset (movers or stayers)
+# 5. Evaluate model on subset (movers or stayers)
 # subset_mask: logical vector indicating which samples belong to the subset
 evaluate_on_subset <- function(predictions, true_outcomes, subset_mask, target_classes) {
   subset_pred <- predictions[subset_mask, ]
@@ -254,13 +283,14 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       nfolds = internal_lambda_folds,
       s = "lambda.1se",
       type.measure = "deviance",
-      standardize = TRUE,
+      standardize = FALSE,
       type.multinomial = "grouped"
     )
 
     graph <- po("imputemean") %>>%
       po("imputeoor") %>>%
       po("encode", method = "treatment") %>>%
+      po("scale") %>>%
       elastic_net
 
     auto_tuner(
@@ -329,6 +359,9 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     learner <- make_learner()
     learner$id <- paste0("ElasticNetNested_", label, "_fold_", i)
     learner$train(task_train)
+    coefficient_matrix <- extract_elastic_net_coefficients(
+      learner, pred_cols, target_classes
+    )
     
     # Get predictions on test set
     pred <- learner$predict(task_test)
@@ -353,6 +386,7 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       bss_per_class = bss_per_class,
       mean_bss = mean(bss_per_class),
       metrics = fold_metrics,
+      coefficients = coefficient_matrix,
       tuned_params = learner$tuning_instance$result_learner_param_vals
     )
 
@@ -365,6 +399,9 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   overall_mean_bss <- mean(all_bss_values)
   all_fold_metrics <- do.call(rbind, lapply(all_fold_results, function(x) x$metrics))
   mean_metrics <- colMeans(all_fold_metrics, na.rm = TRUE)
+  coefficient_array <- simplify2array(lapply(all_fold_results, function(x) x$coefficients))
+  median_coefficients <- apply(coefficient_array, c(1, 2), median, na.rm = TRUE)
+  selection_frequency <- apply(abs(coefficient_array) > 1e-10, c(1, 2), mean, na.rm = TRUE)
   
   # 7. Combine all predictions and outcomes for subset evaluation
   all_true <- unlist(lapply(all_fold_results, function(x) x$true_outcomes))
@@ -425,6 +462,8 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     all_bss_values = all_bss_values,
     all_fold_metrics = all_fold_metrics,
     mean_metrics = mean_metrics,
+    median_coefficients = median_coefficients,
+    selection_frequency = selection_frequency,
     bss_movers = bss_movers,
     bss_stayers = bss_stayers,
     bss_movers_per_fold = bss_movers_per_fold,
@@ -1118,6 +1157,9 @@ count_top_predictors <- function(coef_matrix, abs_threshold) {
 # GENERATE HEATMAPS: RESIDUALIZED MODELS ONLY
 # ============================================================================
 
+GENERATE_LEGACY_CORRELATION_HEATMAPS <- FALSE
+if (GENERATE_LEGACY_CORRELATION_HEATMAPS) {
+
 message("\n" %+% strrep("=", 90))
 message("GENERATING HEATMAP DATA: Residualized Models (Age/Gender controlled)")
 message(strrep("=", 90))
@@ -1383,6 +1425,125 @@ for (i in seq_along(items_list_birth_resid)) {
 }
 
 message("\n" %+% strrep("=", 90) %+% "\n")
+}
+
+# ============================================================================
+# MAIN-TEXT COEFFICIENT HEATMAP: DOMAINS AND THRESHOLDED ITEMS
+# ============================================================================
+
+# Adjustable reporting thresholds. Items are retained when their median outer-
+# fold coefficient reaches the magnitude threshold in at least the specified
+# number of outcome categories. Individual item cells must also meet the outer-
+# fold selection-frequency threshold to be colored.
+ITEM_COEFFICIENT_THRESHOLD <- 0.05
+ITEM_MIN_CATEGORIES <- 3
+ITEM_SELECTION_FREQUENCY_THRESHOLD <- 0.50
+COEFFICIENT_COLOR_LIMIT <- 0.30
+
+coefficient_long <- function(model_object, predictor_set, outcome) {
+  coefficient_data <- as.data.frame(as.table(model_object$median_coefficients))
+  names(coefficient_data) <- c("Predictor", "Class", "Median_Coefficient")
+
+  selection_data <- as.data.frame(as.table(model_object$selection_frequency))
+  names(selection_data) <- c("Predictor", "Class", "Selection_Frequency")
+
+  left_join(coefficient_data, selection_data, by = c("Predictor", "Class")) %>%
+    mutate(Predictor_Set = predictor_set, Outcome = outcome)
+}
+
+coefficient_heatmap_data <- bind_rows(
+  coefficient_long(birth_domains_resid, "Domains", "Birth"),
+  coefficient_long(current_domains_resid, "Domains", "Current"),
+  coefficient_long(birth_items_resid, "Items", "Birth"),
+  coefficient_long(current_items_resid, "Items", "Current")
+) %>%
+  mutate(
+    Settlement = str_to_title(str_remove(Class, "^(born_|current_|stayer_)")),
+    Residence_Status = if_else(str_starts(Class, "stayer_"), "Stayer", "Mover"),
+    Condition = paste(Outcome, Residence_Status),
+    Cell_Passes_Threshold = abs(Median_Coefficient) >= ITEM_COEFFICIENT_THRESHOLD &
+      Selection_Frequency >= ITEM_SELECTION_FREQUENCY_THRESHOLD
+  )
+
+items_for_coefficient_heatmap <- coefficient_heatmap_data %>%
+  filter(Predictor_Set == "Items") %>%
+  group_by(Predictor) %>%
+  summarize(Categories_Passing = sum(Cell_Passes_Threshold), .groups = "drop") %>%
+  filter(Categories_Passing >= ITEM_MIN_CATEGORIES) %>%
+  pull(Predictor)
+
+coefficient_heatmap_filtered <- coefficient_heatmap_data %>%
+  filter(Predictor_Set == "Domains" | Predictor %in% items_for_coefficient_heatmap) %>%
+  mutate(
+    Plot_Coefficient = if_else(
+      Predictor_Set == "Items" & !Cell_Passes_Threshold,
+      NA_real_,
+      Median_Coefficient
+    ),
+    Settlement = factor(Settlement, levels = c("Abroad", "City", "Town", "Village")),
+    Condition = factor(
+      Condition,
+      levels = c("Birth Mover", "Current Mover", "Birth Stayer", "Current Stayer")
+    ),
+    Predictor_Set = factor(Predictor_Set, levels = c("Domains", "Items"))
+  )
+
+p_coefficient_heatmap <- ggplot(
+  coefficient_heatmap_filtered,
+  aes(x = Condition, y = Predictor, fill = Plot_Coefficient)
+) +
+  geom_tile(color = "white", linewidth = 0.25) +
+  facet_grid(
+    rows = vars(Predictor_Set),
+    cols = vars(Settlement),
+    scales = "free_y",
+    space = "free_y",
+    drop = FALSE
+  ) +
+  scale_fill_gradient2(
+    low = "#3B4CC0",
+    mid = "white",
+    high = "#B40426",
+    midpoint = 0,
+    limits = c(-COEFFICIENT_COLOR_LIMIT, COEFFICIENT_COLOR_LIMIT),
+    oob = scales::squish,
+    na.value = "white",
+    name = "Median\ncoefficient"
+  ) +
+  labs(
+    title = "Personality Coefficients for Birth and Current Residence",
+    subtitle = paste0(
+      "Items: |median coefficient| >= ", ITEM_COEFFICIENT_THRESHOLD,
+      ", selection frequency >= ", ITEM_SELECTION_FREQUENCY_THRESHOLD,
+      ", in >= ", ITEM_MIN_CATEGORIES, " categories"
+    ),
+    x = "Outcome and migration status",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+ggsave(
+  "coefficient_heatmap_domains_items_main.png",
+  plot = p_coefficient_heatmap,
+  width = 14,
+  height = max(7, 0.22 * length(items_for_coefficient_heatmap) + 4),
+  dpi = 300,
+  limitsize = FALSE
+)
+write.csv(
+  coefficient_heatmap_filtered,
+  "coefficient_heatmap_domains_items_main.csv",
+  row.names = FALSE
+)
+message("Saved main-text coefficient heatmap and data")
 
 # ============================================================================
 # VISUALIZATION 1: CLASS-SPECIFIC BSS BY OUTCOME AND MODEL
@@ -1581,6 +1742,8 @@ if (RUN_RAW_MODELS) {
 # VISUALIZATION 2: COMPREHENSIVE HEATMAP - ALL PREDICTORS × ALL CONDITIONS
 # ============================================================================
 
+if (GENERATE_LEGACY_CORRELATION_HEATMAPS) {
+
 message("\n" %+% strrep("=", 90))
 message("CREATING COMPREHENSIVE HEATMAP: All Predictors × All Conditions")
 message(strrep("=", 90))
@@ -1683,5 +1846,6 @@ saveRDS(list(
   condition_labels = col_labels,
   label = "comprehensive_all_conditions"
 ), file = "heatmap_comprehensive_all_conditions.rds")
+}
 
 message("\n" %+% strrep("=", 90) %+% "\n")
