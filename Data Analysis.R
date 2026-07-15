@@ -497,59 +497,6 @@ current_items_resid <- unified_model(
 saveRDS(current_items_resid, file = "current_items_resid.rds")
 
 # ============================================================================
-# OPTIONAL: RAW MODELS (Non-residualized for comparison)
-# ============================================================================
-
-message("\n" %+% strrep("=", 90))
-message("OPTIONAL: RAW MODELS (Without Age/Gender Residualization)")
-message(strrep("=", 90))
-
-# Model 5: Predict BIRTH residence with DOMAINS (raw)
-birth_domains_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[4:8],
-  outcome_var = "birth_residence_types",
-  residualize = FALSE,
-  label = "birth_domains_raw",
-  fold_indices = stored_fold_indices
-)
-saveRDS(birth_domains_raw, file = "birth_domains_raw.rds")
-
-# Model 6: Predict BIRTH residence with ITEMS (raw)
-birth_items_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[30:217],
-  outcome_var = "birth_residence_types",
-  residualize = FALSE,
-  label = "birth_items_raw",
-  fold_indices = stored_fold_indices
-)
-saveRDS(birth_items_raw, file = "birth_items_raw.rds")
-
-# Model 7: Predict CURRENT residence with DOMAINS (raw)
-current_domains_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[4:8],
-  outcome_var = "current_residence_types",
-  residualize = FALSE,
-  label = "current_domains_raw",
-  fold_indices = stored_fold_indices
-)
-saveRDS(current_domains_raw, file = "current_domains_raw.rds")
-
-# Model 8: Predict CURRENT residence with ITEMS (raw)
-current_items_raw <- unified_model(
-  df = data,
-  pred_cols = colnames(data)[30:217],
-  outcome_var = "current_residence_types",
-  residualize = FALSE,
-  label = "current_items_raw",
-  fold_indices = stored_fold_indices
-)
-saveRDS(current_items_raw, file = "current_items_raw.rds")
-
-
-# ============================================================================
 # FEATURELESS BASELINE MODELS
 # ============================================================================
 # A featureless model predicts the base rate (class proportions) for all samples
@@ -722,6 +669,64 @@ message(sprintf("  Birth Residence: Overall BSS = %.4f", featureless_birth$overa
 message(sprintf("  Current Residence: Overall BSS = %.4f", featureless_current$overall_mean_bss))
 
 # ============================================================================
+# OPTIONAL: RAW MODELS (Non-residualized for comparison)
+# ============================================================================
+
+RUN_RAW_MODELS <- FALSE
+
+if (RUN_RAW_MODELS) {
+  message("\n" %+% strrep("=", 90))
+  message("OPTIONAL: RAW MODELS (Without Age/Gender Residualization)")
+  message(strrep("=", 90))
+
+# Model 5: Predict BIRTH residence with DOMAINS (raw)
+birth_domains_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "birth_residence_types",
+  residualize = FALSE,
+  label = "birth_domains_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(birth_domains_raw, file = "birth_domains_raw.rds")
+
+# Model 6: Predict BIRTH residence with ITEMS (raw)
+birth_items_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "birth_residence_types",
+  residualize = FALSE,
+  label = "birth_items_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(birth_items_raw, file = "birth_items_raw.rds")
+
+# Model 7: Predict CURRENT residence with DOMAINS (raw)
+current_domains_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[4:8],
+  outcome_var = "current_residence_types",
+  residualize = FALSE,
+  label = "current_domains_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(current_domains_raw, file = "current_domains_raw.rds")
+
+# Model 8: Predict CURRENT residence with ITEMS (raw)
+current_items_raw <- unified_model(
+  df = data,
+  pred_cols = colnames(data)[30:217],
+  outcome_var = "current_residence_types",
+  residualize = FALSE,
+  label = "current_items_raw",
+  fold_indices = stored_fold_indices
+)
+saveRDS(current_items_raw, file = "current_items_raw.rds")
+} else {
+  message("\nSkipping optional raw models (set RUN_RAW_MODELS <- TRUE to run them)")
+}
+
+# ============================================================================
 # DATA SUMMARY: Class Distribution
 # ============================================================================
 
@@ -781,19 +786,20 @@ message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A2$mean_diff, 4
 message(paste0("  t-stat: ", round(test_A2$t_stat, 4), " | p-value: ", round(test_A2$p_value, 4)))
 if (test_A2$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
-# Test A3: Raw models comparison (optional)
-message("\nA3: Birth vs Current prediction (DOMAINS - RAW)")
-test_A3 <- nadeau_bengio_test(current_domains_raw$all_bss_values, birth_domains_raw$all_bss_values)
-message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A3$mean_diff, 4)))
-message(paste0("  t-stat: ", round(test_A3$t_stat, 4), " | p-value: ", round(test_A3$p_value, 4)))
-if (test_A3$p_value < 0.05) message("  *** SIGNIFICANT ***")
+# Tests A3-A4: Raw model comparisons (optional)
+if (RUN_RAW_MODELS) {
+  message("\nA3: Birth vs Current prediction (DOMAINS - RAW)")
+  test_A3 <- nadeau_bengio_test(current_domains_raw$all_bss_values, birth_domains_raw$all_bss_values)
+  message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A3$mean_diff, 4)))
+  message(paste0("  t-stat: ", round(test_A3$t_stat, 4), " | p-value: ", round(test_A3$p_value, 4)))
+  if (test_A3$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
-# Test A4: Raw models comparison (optional)
-message("\nA4: Birth vs Current prediction (ITEMS - RAW)")
-test_A4 <- nadeau_bengio_test(current_items_raw$all_bss_values, birth_items_raw$all_bss_values)
-message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A4$mean_diff, 4)))
-message(paste0("  t-stat: ", round(test_A4$t_stat, 4), " | p-value: ", round(test_A4$p_value, 4)))
-if (test_A4$p_value < 0.05) message("  *** SIGNIFICANT ***")
+  message("\nA4: Birth vs Current prediction (ITEMS - RAW)")
+  test_A4 <- nadeau_bengio_test(current_items_raw$all_bss_values, birth_items_raw$all_bss_values)
+  message(paste0("  Mean BSS diff (Current - Birth): ", round(test_A4$mean_diff, 4)))
+  message(paste0("  t-stat: ", round(test_A4$t_stat, 4), " | p-value: ", round(test_A4$p_value, 4)))
+  if (test_A4$p_value < 0.05) message("  *** SIGNIFICANT ***")
+}
 
 # ============================================================================
 # SECTION B: Additional Comparisons (Optional)
@@ -1559,22 +1565,24 @@ message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)",
                 current_items_resid$overall_mean_bss,
                 current_items_resid$overall_mean_bss - featureless_current$overall_mean_bss))
 
-message("\nPersonality Models - Raw (No Age/Gender Control) - OPTIONAL:")
-message("\nDomains (5 Big Five):")
-message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
-                birth_domains_raw$overall_mean_bss,
-                birth_domains_raw$overall_mean_bss - featureless_birth$overall_mean_bss))
-message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
-                current_domains_raw$overall_mean_bss,
-                current_domains_raw$overall_mean_bss - featureless_current$overall_mean_bss))
+if (RUN_RAW_MODELS) {
+  message("\nPersonality Models - Raw (No Age/Gender Control) - OPTIONAL:")
+  message("\nDomains (5 Big Five):")
+  message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)",
+                  birth_domains_raw$overall_mean_bss,
+                  birth_domains_raw$overall_mean_bss - featureless_birth$overall_mean_bss))
+  message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)",
+                  current_domains_raw$overall_mean_bss,
+                  current_domains_raw$overall_mean_bss - featureless_current$overall_mean_bss))
 
-message("\nItems (188 personality items):")
-message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)", 
-                birth_items_raw$overall_mean_bss,
-                birth_items_raw$overall_mean_bss - featureless_birth$overall_mean_bss))
-message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)", 
-                current_items_raw$overall_mean_bss,
-                current_items_raw$overall_mean_bss - featureless_current$overall_mean_bss))
+  message("\nItems (188 personality items):")
+  message(sprintf("  Birth Residence: Overall BSS = %.4f (Δ = %.4f)",
+                  birth_items_raw$overall_mean_bss,
+                  birth_items_raw$overall_mean_bss - featureless_birth$overall_mean_bss))
+  message(sprintf("  Current Residence: Overall BSS = %.4f (Δ = %.4f)",
+                  current_items_raw$overall_mean_bss,
+                  current_items_raw$overall_mean_bss - featureless_current$overall_mean_bss))
+}
 
 # ============================================================================
 # VISUALIZATION 2: COMPREHENSIVE HEATMAP - ALL PREDICTORS × ALL CONDITIONS
