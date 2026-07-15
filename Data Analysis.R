@@ -25,18 +25,18 @@ data <- data %>%
   mutate(
     # 1. Create Birth Residence Types (7 categories)
     birth_residence_types = case_when(
-      migrator_type18 == "Village stayer"       ~ "stayer_village",
-      migrator_type18 == "Town stayer"          ~ "stayer_town",
-      migrator_type18 == "City stayer"          ~ "stayer_city",
+      migrator_type18 %in% c("Village stayer", "Village to village") ~ "stayer_village",
+      migrator_type18 %in% c("Town stayer", "Town to town")          ~ "stayer_town",
+      migrator_type18 %in% c("City stayer", "City to city")          ~ "stayer_city",
       
       # Born in Village (and moved elsewhere)
       migrator_type18 %in% c("Village to town", "Village to city", "Village to abroad") ~ "born_village",
       
       # Born in Town (and moved elsewhere)
-      migrator_type18 %in% c("Town to village", "Town to city", "Town to abroad", "Town to town") ~ "born_town",
+      migrator_type18 %in% c("Town to village", "Town to city", "Town to abroad") ~ "born_town",
       
       # Born in City (and moved elsewhere)
-      migrator_type18 %in% c("City to village", "City to town", "City to abroad", "City to city") ~ "born_city",
+      migrator_type18 %in% c("City to village", "City to town", "City to abroad") ~ "born_city",
       
       # Born Abroad (and moved elsewhere)
       migrator_type18 %in% c("Abroad to village", "Abroad to town", "Abroad to city") ~ "born_abroad",
@@ -44,20 +44,20 @@ data <- data %>%
       TRUE ~ NA_character_
     ),
     
-    # 2. Create Current Residence Types (7-8 categories)
+    # 2. Create Current Residence Types (7 categories)
     current_residence_types = case_when(
-      migrator_type18 == "Village stayer"       ~ "stayer_village",
-      migrator_type18 == "Town stayer"          ~ "stayer_town",
-      migrator_type18 == "City stayer"          ~ "stayer_city",
+      migrator_type18 %in% c("Village stayer", "Village to village") ~ "stayer_village",
+      migrator_type18 %in% c("Town stayer", "Town to town")          ~ "stayer_town",
+      migrator_type18 %in% c("City stayer", "City to city")          ~ "stayer_city",
       
       # Currently in Village (and migrated there)
       migrator_type18 %in% c("Town to village", "City to village", "Abroad to village") ~ "current_village",
       
       # Currently in Town (and migrated there)
-      migrator_type18 %in% c("Village to town", "City to town", "Abroad to town", "Town to town") ~ "current_town",
+      migrator_type18 %in% c("Village to town", "City to town", "Abroad to town") ~ "current_town",
       
       # Currently in City (and migrated there)
-      migrator_type18 %in% c("Village to city", "Town to city", "Abroad to city", "City to city") ~ "current_city",
+      migrator_type18 %in% c("Village to city", "Town to city", "Abroad to city") ~ "current_city",
       
       # Currently Abroad (and migrated there)
       migrator_type18 %in% c("Village to abroad", "Town to abroad", "City to abroad") ~ "current_abroad",
@@ -1538,4 +1538,3 @@ saveRDS(list(
 ), file = "heatmap_comprehensive_all_conditions.rds")
 
 message("\n" %+% strrep("=", 90) %+% "\n")
-
