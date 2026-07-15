@@ -154,14 +154,16 @@ evaluate_on_subset <- function(predictions, true_outcomes, subset_mask, target_c
 
 
 # ============================================================================
-# UNIFIED MODEL WITH REPEATED STRATIFIED CV (5-fold, 10 repeats)
+# UNIFIED ELASTIC-NET MODEL WITH NESTED RESAMPLING
 # ============================================================================
-# NOTE: Hyperparameter tuning (nested CV) is NOT implemented yet.
-# This performs repeated stratified cross-validation.
-# To implement hyperparameter tuning, you would need an inner resampling loop.
+# Outer resampling: repeated stratified CV (5 folds x 10 repeats), shared by all
+# models. Inner resampling: 5-fold CV on each outer training set. The inner loop
+# tunes alpha and s (the lambda used for prediction by glmnet), so the outer test
+# data are never used for model selection.
 
 unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label, 
-                          fold_indices = NULL) {
+                          fold_indices = NULL, inner_folds = 5,
+                          tuning_evals = 30, tuning_seed = 42) {
   
   message(paste0("\n=== Running unified model: ", label, " ==="))
   
@@ -196,22 +198,37 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
   }
   n_folds <- length(fold_indices)
   
-  # 4. Define learner (multinomial regression)
-  # NOTE: classif.multinom is used without hyperparameter tuning
-  graph <- po("imputemean") %>>% 
-    po("imputeoor") %>>%
-    po("encode", method = "treatment") %>>%
-    lrn("classif.multinom", predict_type = "prob", MaxNWts = 10000)
-  
-  learner <- as_learner(graph)
-  learner$id <- paste0("MultinomReg_", label)
+  # 4. Build a nested elastic-net tuner. A fresh AutoTuner is created for every
+  # outer fold below. Lambda is tuned on a log scale because useful penalties
+  # commonly span several orders of magnitude.
+  make_learner <- function() {
+    elastic_net <- lrn(
+      "classif.glmnet",
+      predict_type = "prob",
+      alpha = to_tune(0, 1),
+      s = to_tune(1e-4, 1, logscale = TRUE),
+      standardize = TRUE,
+      type.multinomial = "grouped"
+    )
+
+    graph <- po("imputemean") %>>%
+      po("imputeoor") %>>%
+      po("encode", method = "treatment") %>>%
+      elastic_net
+
+    auto_tuner(
+      tuner = tnr("random_search"),
+      learner = as_learner(graph),
+      resampling = rsmp("cv", folds = inner_folds),
+      measure = msr("classif.logloss"),
+      terminator = trm("evals", n_evals = tuning_evals)
+    )
+  }
   
   # 5. Run repeated stratified CV using pre-stored fold indices
   all_fold_results <- list()
   
   for (i in 1:n_folds) {
-    if (i %% 5 == 0) message(paste0("  Completed fold ", i, " of ", n_folds))
-    
     train_idx <- fold_indices[[i]]$train
     test_idx <- fold_indices[[i]]$test
     
@@ -258,7 +275,12 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       task_test <- task$clone()$filter(test_idx)
     }
     
-    # Train on training set
+    # Tune only on this outer training set, then refit with the selected
+    # hyperparameters on the complete outer training set.
+    task_train$col_roles$stratum <- "target"
+    set.seed(tuning_seed + i)
+    learner <- make_learner()
+    learner$id <- paste0("ElasticNetNested_", label, "_fold_", i)
     learner$train(task_train)
     
     # Get predictions on test set
@@ -281,8 +303,11 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       true_outcomes = true_outcomes,
       pred_probs = pred_probs,
       bss_per_class = bss_per_class,
-      mean_bss = mean(bss_per_class)
+      mean_bss = mean(bss_per_class),
+      tuned_params = learner$tuning_instance$result_learner_param_vals
     )
+
+    if (i %% 5 == 0) message(paste0("  Completed outer fold ", i, " of ", n_folds))
   }
   
   # 6. Aggregate results across all folds
@@ -352,6 +377,16 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
     bss_movers_per_fold = bss_movers_per_fold,
     bss_stayers_per_fold = bss_stayers_per_fold,
     all_fold_results = all_fold_results,
+    tuned_params = lapply(all_fold_results, function(x) x$tuned_params),
+    tuning = list(
+      learner = "classif.glmnet",
+      parameters = c("alpha", "s"),
+      lambda_range = c(1e-4, 1),
+      inner_folds = inner_folds,
+      tuning_evals = tuning_evals,
+      measure = "classif.logloss",
+      tuner = "random_search"
+    ),
     target_classes = target_classes,
     all_pred_probs = all_pred,
     all_true_outcomes = all_true,
@@ -1503,6 +1538,4 @@ saveRDS(list(
 ), file = "heatmap_comprehensive_all_conditions.rds")
 
 message("\n" %+% strrep("=", 90) %+% "\n")
-
-
 
