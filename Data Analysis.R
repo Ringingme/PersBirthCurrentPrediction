@@ -102,15 +102,22 @@ calculate_bss <- function(actual, predicted_probs, positive_class) {
 # Tests if two paired models are significantly different
 # Input: two vectors of multiclass BSS scores from same folds
 # For multiclass, we average across classes, then compare the fold-wise averages
-nadeau_bengio_test <- function(bss_matrix1, bss_matrix2) {
+nadeau_bengio_test <- function(bss_matrix1, bss_matrix2, folds = 5) {
+  if (!identical(dim(bss_matrix1), dim(bss_matrix2))) {
+    stop("Paired BSS matrices must have identical dimensions")
+  }
+
   # bss_matrix1 and bss_matrix2 should have shape (n_folds, n_classes)
   # Calculate mean BSS per fold (average across classes)
   mean_per_fold_1 <- rowMeans(bss_matrix1)
   mean_per_fold_2 <- rowMeans(bss_matrix2)
-  
+
+  # Retain exactly the same valid resampling pairs for both models.
+  valid_pairs <- is.finite(mean_per_fold_1) & is.finite(mean_per_fold_2)
+  mean_per_fold_1 <- mean_per_fold_1[valid_pairs]
+  mean_per_fold_2 <- mean_per_fold_2[valid_pairs]
   n <- length(mean_per_fold_1)
-  # For repeated 5-fold CV: 50 folds total = 5 folds * 10 repeats
-  p <- 10  # number of repetitions
+  if (n < 2) stop("At least two finite paired resampling scores are required")
   
   # Mean difference
   mean_diff <- mean(mean_per_fold_1 - mean_per_fold_2)
@@ -118,9 +125,11 @@ nadeau_bengio_test <- function(bss_matrix1, bss_matrix2) {
   # Variance of differences
   var_diff <- var(mean_per_fold_1 - mean_per_fold_2)
   
-  # Standard error (Nadeau & Bengio correction)
-  # SE = sqrt((1/n + 1/(5*p)) * var_diff)
-  se <- sqrt((1/n + 1/(5*p)) * var_diff)
+  # Nadeau & Bengio corrected resampled t-test:
+  # SE = sqrt((1 / n_resamples + n_test / n_train) * variance)
+  # For k-fold CV, n_test / n_train = 1 / (k - 1).
+  test_train_ratio <- 1 / (folds - 1)
+  se <- sqrt((1 / n + test_train_ratio) * var_diff)
   
   # t-statistic
   t_stat <- mean_diff / se
@@ -134,6 +143,7 @@ nadeau_bengio_test <- function(bss_matrix1, bss_matrix2) {
     t_stat = t_stat,
     p_value = p_value,
     n_folds = n,
+    test_train_ratio = test_train_ratio,
     mean_per_fold_1 = mean_per_fold_1,
     mean_per_fold_2 = mean_per_fold_2
   ))
@@ -749,7 +759,7 @@ message("=" %+% strrep("=", 90))
 # SECTION A: Current vs Birth Residence Prediction (Aggregate across classes)
 # ============================================================================
 # Comparing predictability of birth location vs current location
-# Both models use combined location + migration status outcome (7-8 classes each)
+# Both models use combined location + migration status outcomes (7 classes each)
 # Key question: Which is more predictable from personality?
 
 message("\n" %+% strrep("-", 90))
@@ -798,13 +808,13 @@ message(strrep("-", 90))
 
 # Compare: Do items predict better than domains?
 message("\nB1: Current Residence - Domains vs Items (RESIDUALIZED)")
-test_B1 <- nadeau_bengio_test(current_domains_resid$all_bss_values, current_items_resid$all_bss_values)
+test_B1 <- nadeau_bengio_test(current_items_resid$all_bss_values, current_domains_resid$all_bss_values)
 message(paste0("  Mean BSS diff (Items - Domains): ", round(test_B1$mean_diff, 4)))
 message(paste0("  t-stat: ", round(test_B1$t_stat, 4), " | p-value: ", round(test_B1$p_value, 4)))
 if (test_B1$p_value < 0.05) message("  *** SIGNIFICANT ***")
 
 message("\nB2: Birth Residence - Domains vs Items (RESIDUALIZED)")
-test_B2 <- nadeau_bengio_test(birth_domains_resid$all_bss_values, birth_items_resid$all_bss_values)
+test_B2 <- nadeau_bengio_test(birth_items_resid$all_bss_values, birth_domains_resid$all_bss_values)
 message(paste0("  Mean BSS diff (Items - Domains): ", round(test_B2$mean_diff, 4)))
 message(paste0("  t-stat: ", round(test_B2$t_stat, 4), " | p-value: ", round(test_B2$p_value, 4)))
 if (test_B2$p_value < 0.05) message("  *** SIGNIFICANT ***")
@@ -880,6 +890,51 @@ for (settlement in overlapping_classes) {
                                                      ifelse(test_result$mean_diff > 0, "MORE", "LESS")))
   }
 }
+
+# ============================================================================
+# SECTION D: Overall BSS vs Featureless Baseline (Residualized Models)
+# ============================================================================
+# Each test uses one macro-average BSS value per outer fold. Positive differences
+# mean that the tuned residualized model outperforms the matching featureless
+# model on average across outcome classes.
+
+message("\n" %+% strrep("-", 90))
+message("SECTION D: Overall Macro-BSS vs Featureless Baseline (RESIDUALIZED)")
+message(strrep("-", 90))
+
+compare_overall_bss <- function(model, baseline, comparison_label) {
+  result <- nadeau_bengio_test(model$all_bss_values, baseline$all_bss_values)
+
+  message(paste0("\n", comparison_label))
+  message(sprintf("  Mean overall BSS (model):    %.4f", model$overall_mean_bss))
+  message(sprintf("  Mean overall BSS (baseline): %.4f", baseline$overall_mean_bss))
+  message(sprintf("  Mean paired difference:      %.4f", result$mean_diff))
+  message(sprintf("  Corrected t-stat: %.4f | p-value: %.4f", result$t_stat, result$p_value))
+  if (result$p_value < 0.05) message("  *** SIGNIFICANT ***")
+
+  result
+}
+
+test_D1 <- compare_overall_bss(
+  current_domains_resid,
+  featureless_current,
+  "D1: Current residence - Domains vs Featureless"
+)
+test_D2 <- compare_overall_bss(
+  current_items_resid,
+  featureless_current,
+  "D2: Current residence - Items vs Featureless"
+)
+test_D3 <- compare_overall_bss(
+  birth_domains_resid,
+  featureless_birth,
+  "D3: Birth residence - Domains vs Featureless"
+)
+test_D4 <- compare_overall_bss(
+  birth_items_resid,
+  featureless_birth,
+  "D4: Birth residence - Items vs Featureless"
+)
 
 # ============================================================================
 # HEATMAP GENERATION: Predictor × Settlement Category
