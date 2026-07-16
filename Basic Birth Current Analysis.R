@@ -87,6 +87,34 @@ if (nrow(analysis_data) == 0) {
   stop("No valid rows remain; inspect the values in the two residence columns")
 }
 
+# Missing-data policy:
+# - age, gender, birth/current residence, and Big Five domains must be complete;
+# - missing personality-item responses are median-imputed separately inside each
+#   outer training fold. Test-fold values never contribute to an imputation.
+complete_required <- c(
+  "ageAtAgreement", "gender", "birth_location", "current_location",
+  domain_predictors
+)
+required_missing <- colSums(is.na(analysis_data[, complete_required, drop = FALSE]))
+if (any(required_missing > 0)) {
+  stop(
+    "Unexpected missing values in variables expected to be complete: ",
+    paste(names(required_missing)[required_missing > 0], collapse = ", ")
+  )
+}
+
+item_missingness <- tibble(
+  Item = item_predictors,
+  Missing_N = colSums(is.na(analysis_data[, item_predictors, drop = FALSE])),
+  Missing_Percent = 100 * Missing_N / nrow(analysis_data)
+) %>%
+  arrange(desc(Missing_N), Item)
+
+message("Missing personality-item responses: ", sum(item_missingness$Missing_N))
+message("Items containing at least one missing response: ",
+        sum(item_missingness$Missing_N > 0))
+write.csv(item_missingness, "basic_item_missingness.csv", row.names = FALSE)
+
 cohort_summary <- list(
   sample = tibble(
     Full_N = nrow(analysis_data),
@@ -151,12 +179,16 @@ residualize_in_outer_fold <- function(df, train_rows, test_rows, predictors) {
   storage.mode(train_x) <- "double"
   storage.mode(test_x) <- "double"
 
-  # Imputation estimates come only from the outer training fold.
+  # Median imputation is robust for the ordinal/Likert personality items. Every
+  # median is estimated only from the current outer training fold. The domains
+  # are complete, so this same code leaves them unchanged.
   medians <- apply(train_x, 2, median, na.rm = TRUE)
-  medians[!is.finite(medians)] <- 0
+  if (any(!is.finite(medians))) {
+    stop("A predictor is entirely missing in an outer training fold")
+  }
   for (column in seq_len(ncol(train_x))) {
-    train_x[!is.finite(train_x[, column]), column] <- medians[column]
-    test_x[!is.finite(test_x[, column]), column] <- medians[column]
+    train_x[is.na(train_x[, column]), column] <- medians[column]
+    test_x[is.na(test_x[, column]), column] <- medians[column]
   }
 
   covariate_train <- model.matrix(
