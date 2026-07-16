@@ -51,7 +51,7 @@ data <- read.csv("NP_resi.csv") %>%
 # Predictor positions follow the original data layout used in the project.
 domain_predictors <- names(data)[4:8]
 item_predictors <- names(data)[30:217]
-location_levels <- c("Village", "Town", "City", "Abroad")
+location_levels <- c("Village", "Town", "City", "Overseas")
 
 required_columns <- c(
   "birthResidenceType", "currentResidenceType2", "ageAtAgreement", "gender"
@@ -61,7 +61,11 @@ if (length(missing_columns)) {
   stop("Missing required columns: ", paste(missing_columns, collapse = ", "))
 }
 
-normalize_location <- function(x) str_to_title(str_trim(as.character(x)))
+normalize_location <- function(x) {
+  x <- str_to_title(str_trim(as.character(x)))
+  # The source data use "Overseas"; use the common analysis label "Abroad".
+  recode(x, "Overseas" = "Abroad")
+}
 
 data <- data %>%
   mutate(
