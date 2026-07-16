@@ -10,6 +10,31 @@ library(mlr3tuning)
 library(tidyverse)
 library(paradox)
 
+# Computational controls for the nested analysis. Five alpha values are usually
+# sufficient for the one-dimensional ridge-to-lasso search; the outer 5 x 10
+# repeated CV remains unchanged for final performance estimation.
+INNER_ALPHA_FOLDS <- 3
+ALPHA_GRID_RESOLUTION <- 5
+INTERNAL_LAMBDA_FOLDS <- 5
+
+# Set MLR3_WORKERS on the server (for example, MLR3_WORKERS=8). If it is not
+# supplied, use up to eight cores made available by the scheduler/system.
+available_workers <- if (requireNamespace("future", quietly = TRUE)) {
+  future::availableCores()
+} else {
+  1L
+}
+MLR3_WORKERS <- as.integer(Sys.getenv(
+  "MLR3_WORKERS",
+  unset = as.character(min(available_workers, 8L))
+))
+if (MLR3_WORKERS > 1L && requireNamespace("future", quietly = TRUE)) {
+  future::plan("multisession", workers = MLR3_WORKERS)
+  message(sprintf("mlr3 tuning enabled on %d parallel workers", MLR3_WORKERS))
+} else {
+  message("mlr3 tuning running sequentially")
+}
+
 
 # ============================================================================
 # DATA PREPARATION (Do not change)
@@ -223,14 +248,15 @@ evaluate_on_subset <- function(predictions, true_outcomes, subset_mask, target_c
 # UNIFIED ELASTIC-NET MODEL WITH NESTED RESAMPLING
 # ============================================================================
 # Outer resampling: repeated stratified CV (5 folds x 10 repeats), shared by all
-# models. Inner resampling: 5-fold CV on each outer training set. The inner loop
+# models. Inner resampling: 3-fold CV on each outer training set. The inner loop
 # tunes alpha; classif.cv_glmnet selects lambda internally within each fit. The
 # outer test data are never used for either hyperparameter selection.
 
 unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label, 
-                          fold_indices = NULL, inner_folds = 5,
-                          alpha_grid_resolution = 11,
-                          internal_lambda_folds = 5, tuning_seed = 42) {
+                          fold_indices = NULL, inner_folds = INNER_ALPHA_FOLDS,
+                          alpha_grid_resolution = ALPHA_GRID_RESOLUTION,
+                          internal_lambda_folds = INTERNAL_LAMBDA_FOLDS,
+                          tuning_seed = 42) {
   
   message(paste0("\n=== Running unified model: ", label, " ==="))
   
@@ -294,16 +320,22 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       elastic_net
 
     auto_tuner(
-      tuner = tnr("grid_search", resolution = alpha_grid_resolution),
+      tuner = tnr(
+        "grid_search",
+        resolution = alpha_grid_resolution,
+        batch_size = alpha_grid_resolution
+      ),
       learner = as_learner(graph),
       resampling = rsmp("cv", folds = inner_folds),
       measure = msr("classif.logloss"),
-      terminator = trm("none")
+      terminator = trm("none"),
+      store_benchmark_result = FALSE
     )
   }
   
   # 5. Run repeated stratified CV using pre-stored fold indices
   all_fold_results <- list()
+  model_start_time <- proc.time()[["elapsed"]]
   
   for (i in 1:n_folds) {
     train_idx <- fold_indices[[i]]$train
@@ -390,7 +422,11 @@ unified_model <- function(df, pred_cols, outcome_var, residualize = FALSE, label
       tuned_params = learner$tuning_instance$result_learner_param_vals
     )
 
-    if (i %% 5 == 0) message(paste0("  Completed outer fold ", i, " of ", n_folds))
+    elapsed_minutes <- (proc.time()[["elapsed"]] - model_start_time) / 60
+    message(sprintf(
+      "  Completed outer fold %d of %d (%.1f minutes elapsed)",
+      i, n_folds, elapsed_minutes
+    ))
   }
   
   # 6. Aggregate results across all folds
