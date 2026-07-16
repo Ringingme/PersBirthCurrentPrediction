@@ -51,7 +51,7 @@ data <- read.csv("NP_resi.csv") %>%
 # Predictor positions follow the original data layout used in the project.
 domain_predictors <- names(data)[4:8]
 item_predictors <- names(data)[30:217]
-location_levels <- c("Village", "Town", "City", "Overseas")
+location_levels <- c("Village", "Town", "City", "Abroad")
 
 required_columns <- c(
   "birthResidenceType", "currentResidenceType2", "ageAtAgreement", "gender"
@@ -63,8 +63,8 @@ if (length(missing_columns)) {
 
 normalize_location <- function(x) {
   x <- str_to_title(str_trim(as.character(x)))
-  # Use the source-data label consistently; also accept legacy "Abroad" values.
-  recode(x, "Abroad" = "Overseas")
+  # Rename the source-data value once, then use "Abroad" throughout.
+  recode(x, "Overseas" = "Abroad")
 }
 
 data <- data %>%
