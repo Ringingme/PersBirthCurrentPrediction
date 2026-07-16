@@ -135,27 +135,61 @@ write.csv(cohort_summary$transition_table, "basic_transition_table.csv", row.nam
 
 # Joint stratification makes birth and current proportions similar in every
 # paired test fold. Random offsets avoid putting all tiny strata in fold 1.
-make_joint_folds <- function(birth, current, k, repeats, seed = 42) {
+make_joint_folds <- function(birth, current, k, repeats, seed = 42,
+                             row_ids = seq_along(birth), max_attempts = 1000,
+                             min_train_per_class = INNER_FOLDS) {
   strata <- interaction(birth, current, drop = TRUE)
+  birth <- droplevels(factor(birth))
+  current <- droplevels(factor(current))
+
+  if (any(table(birth) < 2) || any(table(current) < 2)) {
+    stop(
+      "Every birth and current class needs at least two observations for outer CV. ",
+      "Birth counts: ", paste(names(table(birth)), table(birth), collapse = ", "),
+      "; current counts: ",
+      paste(names(table(current)), table(current), collapse = ", ")
+    )
+  }
+
   output <- vector("list", k * repeats)
   position <- 1L
 
   for (repeat_id in seq_len(repeats)) {
-    set.seed(seed + repeat_id)
-    fold_id <- integer(length(strata))
+    valid_assignment <- FALSE
 
-    for (stratum in levels(strata)) {
-      rows <- sample(which(strata == stratum))
-      offset <- sample.int(k, 1) - 1L
-      fold_id[rows] <- ((seq_along(rows) - 1L + offset) %% k) + 1L
+    for (attempt in seq_len(max_attempts)) {
+      set.seed(seed + repeat_id * 10000 + attempt)
+      fold_id <- integer(length(strata))
+
+      for (stratum in levels(strata)) {
+        rows <- sample(which(strata == stratum))
+        offset <- sample.int(k, 1) - 1L
+        fold_id[rows] <- ((seq_along(rows) - 1L + offset) %% k) + 1L
+      }
+
+      # Each outer training set must contain every class occurring in this
+      # analysis sample. Rare transition strata are allowed, but the marginal
+      # birth/current classes cannot disappear from training.
+      valid_assignment <- all(vapply(seq_len(k), function(fold) {
+        train <- fold_id != fold
+        all(table(birth[train]) >= min_train_per_class) &&
+          all(table(current[train]) >= min_train_per_class)
+      }, logical(1)))
+
+      if (valid_assignment) break
+    }
+
+    if (!valid_assignment) {
+      stop("Could not construct valid stratified folds after ", max_attempts,
+           " attempts; reduce OUTER_FOLDS or combine very rare classes")
     }
 
     for (fold in seq_len(k)) {
       output[[position]] <- list(
         repeat_id = repeat_id,
         fold = fold,
-        train = which(fold_id != fold),
-        test = which(fold_id == fold)
+        train = row_ids[fold_id != fold],
+        test = row_ids[fold_id == fold]
       )
       position <- position + 1L
     }
@@ -169,6 +203,20 @@ paired_folds <- make_joint_folds(
   analysis_data$current_location,
   OUTER_FOLDS,
   OUTER_REPEATS
+)
+
+# Movers need their own stratified folds. Subsetting the full-sample folds after
+# their creation can accidentally remove an entire location class from a mover
+# training fold. These folds remain perfectly paired between the mover birth
+# and current models.
+mover_rows <- which(analysis_data$mobility == "Mover")
+mover_folds <- make_joint_folds(
+  analysis_data$birth_location[mover_rows],
+  analysis_data$current_location[mover_rows],
+  OUTER_FOLDS,
+  OUTER_REPEATS,
+  seed = 142,
+  row_ids = mover_rows
 )
 
 # ---- Fold-specific preprocessing -------------------------------------------
@@ -264,19 +312,39 @@ binary_metrics <- function(actual, probability, baseline) {
 
 # ---- Model fitting ----------------------------------------------------------
 
+make_inner_foldid <- function(y, k, seed) {
+  y <- droplevels(factor(y))
+  if (any(table(y) < k)) {
+    stop(
+      "An outer training class has fewer observations than INNER_FOLDS. Counts: ",
+      paste(names(table(y)), table(y), collapse = ", ")
+    )
+  }
+
+  set.seed(seed)
+  foldid <- integer(length(y))
+  for (class_name in levels(y)) {
+    rows <- sample(which(y == class_name))
+    offset <- sample.int(k, 1) - 1L
+    foldid[rows] <- ((seq_along(rows) - 1L + offset) %% k) + 1L
+  }
+  foldid
+}
+
 fit_multinomial <- function(train_x, test_x, train_y, test_y, seed) {
   train_y <- factor(train_y, levels = location_levels)
   test_y <- factor(test_y, levels = location_levels)
   if (any(table(train_y) == 0)) stop("An outer training fold is missing a location class")
 
   baseline <- prop.table(table(train_y))
+  inner_foldid <- make_inner_foldid(train_y, INNER_FOLDS, seed)
   set.seed(seed)
   fit <- cv.glmnet(
     train_x, train_y,
     family = "multinomial",
     type.multinomial = "grouped",
     alpha = ELASTIC_NET_ALPHA,
-    nfolds = INNER_FOLDS,
+    foldid = inner_foldid,
     type.measure = "deviance",
     standardize = TRUE
   )
@@ -297,12 +365,13 @@ fit_binary <- function(train_x, test_x, train_y, test_y, seed) {
   if (any(table(train_y) == 0)) stop("An outer training fold is missing a mobility class")
 
   baseline <- mean(train_y == "Stayer")
+  inner_foldid <- make_inner_foldid(train_y, INNER_FOLDS, seed)
   set.seed(seed)
   fit <- cv.glmnet(
     train_x, train_y,
     family = "binomial",
     alpha = ELASTIC_NET_ALPHA,
-    nfolds = INNER_FOLDS,
+    foldid = inner_foldid,
     type.measure = "deviance",
     standardize = TRUE
   )
@@ -319,16 +388,13 @@ fit_binary <- function(train_x, test_x, train_y, test_y, seed) {
 # ---- Birth versus current comparison ---------------------------------------
 
 run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
-  results <- vector("list", length(paired_folds))
+  folds_to_use <- if (movers_only) mover_folds else paired_folds
+  results <- vector("list", length(folds_to_use))
 
-  for (i in seq_along(paired_folds)) {
-    split <- paired_folds[[i]]
+  for (i in seq_along(folds_to_use)) {
+    split <- folds_to_use[[i]]
     train_rows <- split$train
     test_rows <- split$test
-    if (movers_only) {
-      train_rows <- train_rows[df$mobility[train_rows] == "Mover"]
-      test_rows <- test_rows[df$mobility[test_rows] == "Mover"]
-    }
 
     x <- residualize_in_outer_fold(df, train_rows, test_rows, predictors)
     birth <- fit_multinomial(
@@ -356,7 +422,7 @@ run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
       )
 
     message(model_name, " [", ifelse(movers_only, "movers", "all"),
-            "]: outer split ", i, "/", length(paired_folds))
+            "]: outer split ", i, "/", length(folds_to_use))
   }
 
   bind_rows(results)
