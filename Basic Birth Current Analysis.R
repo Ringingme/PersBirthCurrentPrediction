@@ -63,8 +63,8 @@ if (length(missing_columns)) {
 
 normalize_location <- function(x) {
   x <- str_to_title(str_trim(as.character(x)))
-  # The source data use "Overseas"; use the common analysis label "Abroad".
-  recode(x, "Overseas" = "Abroad")
+  # Use the source-data label consistently; also accept legacy "Abroad" values.
+  recode(x, "Abroad" = "Overseas")
 }
 
 data <- data %>%
