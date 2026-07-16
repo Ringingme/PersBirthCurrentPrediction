@@ -63,7 +63,7 @@ if (length(missing_columns)) {
 
 normalize_location <- function(x) str_to_title(str_trim(as.character(x)))
 
-analysis_data <- data %>%
+data <- data %>%
   mutate(
     birth_location = normalize_location(birthResidenceType),
     current_location = normalize_location(currentResidenceType2),
@@ -83,7 +83,7 @@ analysis_data <- data %>%
     )
   )
 
-if (nrow(analysis_data) == 0) {
+if (nrow(data) == 0) {
   stop("No valid rows remain; inspect the values in the two residence columns")
 }
 
@@ -95,7 +95,7 @@ complete_required <- c(
   "ageAtAgreement", "gender", "birth_location", "current_location",
   domain_predictors
 )
-required_missing <- colSums(is.na(analysis_data[, complete_required, drop = FALSE]))
+required_missing <- colSums(is.na(data[, complete_required, drop = FALSE]))
 if (any(required_missing > 0)) {
   stop(
     "Unexpected missing values in variables expected to be complete: ",
@@ -105,8 +105,8 @@ if (any(required_missing > 0)) {
 
 item_missingness <- tibble(
   Item = item_predictors,
-  Missing_N = colSums(is.na(analysis_data[, item_predictors, drop = FALSE])),
-  Missing_Percent = 100 * Missing_N / nrow(analysis_data)
+  Missing_N = colSums(is.na(data[, item_predictors, drop = FALSE])),
+  Missing_Percent = 100 * Missing_N / nrow(data)
 ) %>%
   arrange(desc(Missing_N), Item)
 
@@ -117,12 +117,12 @@ write.csv(item_missingness, "basic_item_missingness.csv", row.names = FALSE)
 
 cohort_summary <- list(
   sample = tibble(
-    Full_N = nrow(analysis_data),
-    Movers = sum(analysis_data$mobility == "Mover"),
-    Stayers = sum(analysis_data$mobility == "Stayer")
+    Full_N = nrow(data),
+    Movers = sum(data$mobility == "Mover"),
+    Stayers = sum(data$mobility == "Stayer")
   ),
   transition_table = as.data.frame.matrix(
-    table(analysis_data$birth_location, analysis_data$current_location)
+    table(data$birth_location, data$current_location)
   ) %>% rownames_to_column("Birth")
 )
 
@@ -199,8 +199,8 @@ make_joint_folds <- function(birth, current, k, repeats, seed = 42,
 }
 
 paired_folds <- make_joint_folds(
-  analysis_data$birth_location,
-  analysis_data$current_location,
+  data$birth_location,
+  data$current_location,
   OUTER_FOLDS,
   OUTER_REPEATS
 )
@@ -209,10 +209,10 @@ paired_folds <- make_joint_folds(
 # their creation can accidentally remove an entire location class from a mover
 # training fold. These folds remain perfectly paired between the mover birth
 # and current models.
-mover_rows <- which(analysis_data$mobility == "Mover")
+mover_rows <- which(data$mobility == "Mover")
 mover_folds <- make_joint_folds(
-  analysis_data$birth_location[mover_rows],
-  analysis_data$current_location[mover_rows],
+  data$birth_location[mover_rows],
+  data$current_location[mover_rows],
   OUTER_FOLDS,
   OUTER_REPEATS,
   seed = 142,
@@ -541,13 +541,13 @@ if (RUN_ITEM_MODELS) {
 birth_current_results <- bind_rows(lapply(names(predictor_sets), function(name) {
   predictors <- predictor_sets[[name]]
   bind_rows(
-    run_birth_current(analysis_data, predictors, name, movers_only = FALSE),
-    run_birth_current(analysis_data, predictors, name, movers_only = TRUE)
+    run_birth_current(data, predictors, name, movers_only = FALSE),
+    run_birth_current(data, predictors, name, movers_only = TRUE)
   )
 }))
 
 stayer_results <- bind_rows(lapply(names(predictor_sets), function(name) {
-  run_all_stayer_analyses(analysis_data, predictor_sets[[name]], name)
+  run_all_stayer_analyses(data, predictor_sets[[name]], name)
 }))
 
 birth_current_summary <- birth_current_results %>%
