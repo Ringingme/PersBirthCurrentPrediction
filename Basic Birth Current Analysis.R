@@ -1,17 +1,26 @@
 # =============================================================================
-# BASIC ANALYSIS: DOES PERSONALITY BETTER PREDICT BIRTH OR CURRENT LOCATION?
+# DOES PERSONALITY BETTER REFLECT BIRTH OR CURRENT LOCATION?
 # =============================================================================
+# Analysis only: this script creates tables/CSV files and no figures.
 #
-# This script deliberately uses the SAME four outcome categories, participants,
-# predictors, and outer resampling splits for birth and current location.
-# Therefore, Current - Birth performance is a meaningful paired comparison.
+# Analysis 1 (all participants):
+#   Personality -> birthResidenceType versus
+#   Personality -> currentResidenceType2
 #
-# Primary analysis: all participants.
-# Secondary analysis: movers only (recommended for interpreting the contrast),
-# because birth and current locations are identical by definition for stayers.
+# Analysis 2 (movers only):
+#   The same paired comparison among people whose two locations differ.
 #
-# Models: multinomial elastic net (alpha fixed at 0.5). cv.glmnet selects lambda
-# inside each outer training set, so the outer test fold remains untouched.
+# Analysis 3 (stayer distinctiveness):
+#   a) all stayers versus all movers;
+#   b) within each birthplace, stayed versus moved away;
+#   c) within each current location, stayer versus moved in.
+#
+# In every outer fold, personality scores are first imputed and then residualized
+# for age and gender using the OUTER TRAINING DATA ONLY. The fitted adjustment is
+# applied to the outer test data, preventing information leakage.
+#
+# cv.glmnet selects lambda internally within each outer training set. Alpha is
+# fixed at 0.5 to keep this basic analysis computationally manageable.
 
 library(tidyverse)
 library(glmnet)
@@ -21,21 +30,17 @@ set.seed(42)
 # ---- User settings ----------------------------------------------------------
 
 PROJECT_DIR <- "/data/scripts/Ling/Proj5BirthCurrentPrediction/"
-MIGRATION_FILE <- "/data/scripts/Ling/Proj3Migration/MigPrediction/migB5.csv"
-
 OUTER_FOLDS <- 5
 OUTER_REPEATS <- 5       # use 10 for the final analysis if runtime permits
 INNER_FOLDS <- 5
-ELASTIC_NET_ALPHA <- 0.5 # 0 = ridge, 1 = lasso, 0.5 = elastic net
-
-RUN_ITEM_MODELS <- TRUE  # set FALSE for a quick domain-only run
-ANALYZE_MOVERS_ONLY <- TRUE
+ELASTIC_NET_ALPHA <- 0.5 # 0 = ridge, 1 = lasso
+RUN_ITEM_MODELS <- TRUE  # FALSE gives a much faster domain-only run
 
 setwd(PROJECT_DIR)
 
-# ---- Data preparation -------------------------------------------------------
+# ---- Data -------------------------------------------------------------------
 
-NP_resi <- read.csv("NP_resi.csv") %>%
+data <- read.csv("NP_resi.csv") %>%
   rename_with(~ sub("\\.x$", "", .x)) %>%
   select(
     -neuroticism23R, -neuroticism24, -neuroticism31, -neuroticism32R,
@@ -43,56 +48,68 @@ NP_resi <- read.csv("NP_resi.csv") %>%
     -others12, -others14
   )
 
-migration <- read.csv(MIGRATION_FILE) %>%
-  select(scode, migrator_type18)
-
-data <- NP_resi %>%
-  select(1:217) %>%
-  left_join(migration, by = "scode") %>%
-  mutate(
-    # Handles both "Village stayer" and transitions such as
-    # "Village to town" or "Village to village".
-    birth_location = case_when(
-      str_detect(migrator_type18, " stayer$") ~ str_remove(migrator_type18, " stayer$"),
-      str_detect(migrator_type18, " to ") ~ str_extract(migrator_type18, "^[^ ]+"),
-      TRUE ~ NA_character_
-    ),
-    current_location = case_when(
-      str_detect(migrator_type18, " stayer$") ~ str_remove(migrator_type18, " stayer$"),
-      str_detect(migrator_type18, " to ") ~ str_extract(migrator_type18, "(?<= to ).+$"),
-      TRUE ~ NA_character_
-    ),
-    birth_location = str_to_title(birth_location),
-    current_location = str_to_title(current_location),
-    mover = birth_location != current_location
-  )
-
-location_levels <- c("Village", "Town", "City", "Abroad")
-
-data <- data %>%
-  filter(birth_location %in% location_levels, current_location %in% location_levels) %>%
-  mutate(
-    birth_location = factor(birth_location, levels = location_levels),
-    current_location = factor(current_location, levels = location_levels)
-  )
-
+# Predictor positions follow the original data layout used in the project.
 domain_predictors <- names(data)[4:8]
 item_predictors <- names(data)[30:217]
+location_levels <- c("Village", "Town", "City", "Abroad")
 
-# Use a single complete outcome cohort. Predictor missingness is imputed from
-# each training fold below, without using test-fold information.
+required_columns <- c(
+  "birthResidenceType", "currentResidenceType2", "ageAtAgreement", "gender"
+)
+missing_columns <- setdiff(required_columns, names(data))
+if (length(missing_columns)) {
+  stop("Missing required columns: ", paste(missing_columns, collapse = ", "))
+}
+
+normalize_location <- function(x) str_to_title(str_trim(as.character(x)))
+
 analysis_data <- data %>%
-  drop_na(birth_location, current_location)
+  mutate(
+    birth_location = normalize_location(birthResidenceType),
+    current_location = normalize_location(currentResidenceType2),
+    gender = factor(gender)
+  ) %>%
+  filter(
+    birth_location %in% location_levels,
+    current_location %in% location_levels
+  ) %>%
+  drop_na(ageAtAgreement, gender) %>%
+  mutate(
+    birth_location = factor(birth_location, levels = location_levels),
+    current_location = factor(current_location, levels = location_levels),
+    mobility = factor(
+      if_else(birth_location == current_location, "Stayer", "Mover"),
+      levels = c("Mover", "Stayer")
+    )
+  )
 
-message("Full analysis cohort: ", nrow(analysis_data))
-message("Movers: ", sum(analysis_data$mover), "; stayers: ", sum(!analysis_data$mover))
-print(table(analysis_data$birth_location, analysis_data$current_location))
+if (nrow(analysis_data) == 0) {
+  stop("No valid rows remain; inspect the values in the two residence columns")
+}
 
-# ---- Paired, jointly stratified outer folds ---------------------------------
+cohort_summary <- list(
+  sample = tibble(
+    Full_N = nrow(analysis_data),
+    Movers = sum(analysis_data$mobility == "Mover"),
+    Stayers = sum(analysis_data$mobility == "Stayer")
+  ),
+  transition_table = as.data.frame.matrix(
+    table(analysis_data$birth_location, analysis_data$current_location)
+  ) %>% rownames_to_column("Birth")
+)
 
-make_paired_folds <- function(birth, current, k = 5, repeats = 5, seed = 42) {
+print(cohort_summary$sample)
+print(cohort_summary$transition_table)
+write.csv(cohort_summary$sample, "basic_cohort_summary.csv", row.names = FALSE)
+write.csv(cohort_summary$transition_table, "basic_transition_table.csv", row.names = FALSE)
+
+# ---- Resampling -------------------------------------------------------------
+
+# Joint stratification makes birth and current proportions similar in every
+# paired test fold. Random offsets avoid putting all tiny strata in fold 1.
+make_joint_folds <- function(birth, current, k, repeats, seed = 42) {
   strata <- interaction(birth, current, drop = TRUE)
-  folds <- vector("list", k * repeats)
+  output <- vector("list", k * repeats)
   position <- 1L
 
   for (repeat_id in seq_len(repeats)) {
@@ -101,11 +118,12 @@ make_paired_folds <- function(birth, current, k = 5, repeats = 5, seed = 42) {
 
     for (stratum in levels(strata)) {
       rows <- sample(which(strata == stratum))
-      fold_id[rows] <- rep(seq_len(k), length.out = length(rows))
+      offset <- sample.int(k, 1) - 1L
+      fold_id[rows] <- ((seq_along(rows) - 1L + offset) %% k) + 1L
     }
 
     for (fold in seq_len(k)) {
-      folds[[position]] <- list(
+      output[[position]] <- list(
         repeat_id = repeat_id,
         fold = fold,
         train = which(fold_id != fold),
@@ -115,220 +133,355 @@ make_paired_folds <- function(birth, current, k = 5, repeats = 5, seed = 42) {
     }
   }
 
-  folds
+  output
 }
 
-paired_folds <- make_paired_folds(
+paired_folds <- make_joint_folds(
   analysis_data$birth_location,
   analysis_data$current_location,
-  k = OUTER_FOLDS,
-  repeats = OUTER_REPEATS
+  OUTER_FOLDS,
+  OUTER_REPEATS
 )
 
-# ---- Metrics and fitting ----------------------------------------------------
+# ---- Fold-specific preprocessing -------------------------------------------
 
-impute_from_training <- function(train_x, test_x) {
-  train_x <- as.matrix(train_x)
-  test_x <- as.matrix(test_x)
+residualize_in_outer_fold <- function(df, train_rows, test_rows, predictors) {
+  train_x <- as.matrix(df[train_rows, predictors, drop = FALSE])
+  test_x <- as.matrix(df[test_rows, predictors, drop = FALSE])
+  storage.mode(train_x) <- "double"
+  storage.mode(test_x) <- "double"
 
+  # Imputation estimates come only from the outer training fold.
   medians <- apply(train_x, 2, median, na.rm = TRUE)
   medians[!is.finite(medians)] <- 0
-
   for (column in seq_len(ncol(train_x))) {
     train_x[!is.finite(train_x[, column]), column] <- medians[column]
     test_x[!is.finite(test_x[, column]), column] <- medians[column]
   }
 
-  list(train = train_x, test = test_x)
+  covariate_train <- model.matrix(
+    ~ ageAtAgreement + gender,
+    data = df[train_rows, , drop = FALSE]
+  )
+  covariate_test <- model.matrix(
+    ~ ageAtAgreement + gender,
+    data = df[test_rows, , drop = FALSE]
+  )
+
+  # One multivariate least-squares fit residualizes every personality score.
+  adjustment <- lm.fit(x = covariate_train, y = train_x)$coefficients
+  adjustment[!is.finite(adjustment)] <- 0
+
+  list(
+    train = train_x - covariate_train %*% adjustment,
+    test = test_x - covariate_test %*% adjustment
+  )
 }
 
-multiclass_metrics <- function(actual, probabilities, baseline_probabilities) {
+# ---- Metrics ---------------------------------------------------------------
+
+multiclass_metrics <- function(actual, probabilities, baseline) {
   actual <- factor(actual, levels = location_levels)
   observed <- model.matrix(~ actual - 1)
   colnames(observed) <- location_levels
   probabilities <- probabilities[, location_levels, drop = FALSE]
 
-  model_brier <- mean(rowSums((probabilities - observed)^2))
   baseline_matrix <- matrix(
-    rep(baseline_probabilities, each = nrow(observed)),
+    rep(as.numeric(baseline), each = nrow(observed)),
     nrow = nrow(observed),
     dimnames = list(NULL, location_levels)
   )
+  model_brier <- mean(rowSums((probabilities - observed)^2))
   baseline_brier <- mean(rowSums((baseline_matrix - observed)^2))
-
   actual_index <- match(as.character(actual), location_levels)
-  predicted_class <- location_levels[max.col(probabilities, ties.method = "first")]
+  predicted <- location_levels[max.col(probabilities, ties.method = "first")]
   recall <- vapply(location_levels, function(class_name) {
     rows <- actual == class_name
     if (!any(rows)) return(NA_real_)
-    mean(predicted_class[rows] == class_name)
+    mean(predicted[rows] == class_name)
   }, numeric(1))
 
   c(
     BSS = 1 - model_brier / baseline_brier,
     Brier = model_brier,
-    LogLoss = -mean(log(pmax(probabilities[cbind(seq_along(actual), actual_index)], 1e-15))),
-    Accuracy = mean(predicted_class == as.character(actual)),
+    LogLoss = -mean(log(pmax(
+      probabilities[cbind(seq_along(actual), actual_index)], 1e-15
+    ))),
+    Accuracy = mean(predicted == as.character(actual)),
     BalancedAccuracy = mean(recall, na.rm = TRUE)
   )
 }
 
-fit_one_outcome <- function(train_x, test_x, train_y, test_y) {
-  baseline <- prop.table(table(factor(train_y, levels = location_levels)))
+binary_metrics <- function(actual, probability, baseline) {
+  actual <- as.numeric(actual == "Stayer")
+  predicted <- if_else(probability >= 0.5, 1, 0)
+  model_brier <- mean((probability - actual)^2)
+  baseline_brier <- mean((baseline - actual)^2)
+  sensitivity <- if (any(actual == 1)) mean(predicted[actual == 1] == 1) else NA_real_
+  specificity <- if (any(actual == 0)) mean(predicted[actual == 0] == 0) else NA_real_
 
-  set.seed(42)
+  c(
+    BSS = 1 - model_brier / baseline_brier,
+    Brier = model_brier,
+    LogLoss = -mean(actual * log(pmax(probability, 1e-15)) +
+      (1 - actual) * log(pmax(1 - probability, 1e-15))),
+    Accuracy = mean(predicted == actual),
+    BalancedAccuracy = mean(c(sensitivity, specificity), na.rm = TRUE)
+  )
+}
+
+# ---- Model fitting ----------------------------------------------------------
+
+fit_multinomial <- function(train_x, test_x, train_y, test_y, seed) {
+  train_y <- factor(train_y, levels = location_levels)
+  test_y <- factor(test_y, levels = location_levels)
+  if (any(table(train_y) == 0)) stop("An outer training fold is missing a location class")
+
+  baseline <- prop.table(table(train_y))
+  set.seed(seed)
   fit <- cv.glmnet(
-    x = train_x,
-    y = factor(train_y, levels = location_levels),
+    train_x, train_y,
     family = "multinomial",
     type.multinomial = "grouped",
     alpha = ELASTIC_NET_ALPHA,
     nfolds = INNER_FOLDS,
     type.measure = "deviance",
-    standardize = TRUE,
-    parallel = FALSE
+    standardize = TRUE
   )
 
-  probabilities <- predict(fit, newx = test_x, s = "lambda.1se", type = "response")[, , 1]
-  probabilities <- probabilities[, location_levels, drop = FALSE]
+  probability <- predict(
+    fit, newx = test_x, s = "lambda.1se", type = "response"
+  )[, , 1]
 
   list(
-    metrics = multiclass_metrics(test_y, probabilities, baseline),
-    probabilities = probabilities,
+    metrics = multiclass_metrics(test_y, probability, baseline),
     lambda = fit$lambda.1se
   )
 }
 
-run_paired_comparison <- function(df, predictors, model_name, movers_only = FALSE) {
-  fold_results <- vector("list", length(paired_folds))
+fit_binary <- function(train_x, test_x, train_y, test_y, seed) {
+  train_y <- factor(train_y, levels = c("Mover", "Stayer"))
+  test_y <- factor(test_y, levels = c("Mover", "Stayer"))
+  if (any(table(train_y) == 0)) stop("An outer training fold is missing a mobility class")
+
+  baseline <- mean(train_y == "Stayer")
+  set.seed(seed)
+  fit <- cv.glmnet(
+    train_x, train_y,
+    family = "binomial",
+    alpha = ELASTIC_NET_ALPHA,
+    nfolds = INNER_FOLDS,
+    type.measure = "deviance",
+    standardize = TRUE
+  )
+  probability <- as.numeric(predict(
+    fit, newx = test_x, s = "lambda.1se", type = "response"
+  ))
+
+  list(
+    metrics = binary_metrics(test_y, probability, baseline),
+    lambda = fit$lambda.1se
+  )
+}
+
+# ---- Birth versus current comparison ---------------------------------------
+
+run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
+  results <- vector("list", length(paired_folds))
 
   for (i in seq_along(paired_folds)) {
     split <- paired_folds[[i]]
     train_rows <- split$train
     test_rows <- split$test
-
-    # Movers-only is an evaluation of the same population definition in both
-    # outcomes. Both training and testing are restricted to movers.
     if (movers_only) {
-      train_rows <- train_rows[df$mover[train_rows]]
-      test_rows <- test_rows[df$mover[test_rows]]
+      train_rows <- train_rows[df$mobility[train_rows] == "Mover"]
+      test_rows <- test_rows[df$mobility[test_rows] == "Mover"]
     }
 
-    imputed <- impute_from_training(
-      df[train_rows, predictors, drop = FALSE],
-      df[test_rows, predictors, drop = FALSE]
+    x <- residualize_in_outer_fold(df, train_rows, test_rows, predictors)
+    birth <- fit_multinomial(
+      x$train, x$test, df$birth_location[train_rows],
+      df$birth_location[test_rows], seed = 1000 + i
+    )
+    current <- fit_multinomial(
+      x$train, x$test, df$current_location[train_rows],
+      df$current_location[test_rows], seed = 2000 + i
     )
 
-    birth_fit <- fit_one_outcome(
-      imputed$train, imputed$test,
-      df$birth_location[train_rows], df$birth_location[test_rows]
-    )
-    current_fit <- fit_one_outcome(
-      imputed$train, imputed$test,
-      df$current_location[train_rows], df$current_location[test_rows]
-    )
-
-    fold_results[[i]] <- bind_rows(
-      as.data.frame(as.list(birth_fit$metrics)) %>% mutate(Outcome = "Birth", Lambda = birth_fit$lambda),
-      as.data.frame(as.list(current_fit$metrics)) %>% mutate(Outcome = "Current", Lambda = current_fit$lambda)
+    results[[i]] <- bind_rows(
+      as.data.frame(as.list(birth$metrics)) %>%
+        mutate(Outcome = "Birth", Lambda = birth$lambda),
+      as.data.frame(as.list(current$metrics)) %>%
+        mutate(Outcome = "Current", Lambda = current$lambda)
     ) %>%
       mutate(
         Model = model_name,
         Sample = if_else(movers_only, "Movers only", "All participants"),
         Repeat = split$repeat_id,
         Fold = split$fold,
+        TrainN = length(train_rows),
         TestN = length(test_rows)
       )
 
-    message(model_name, " [", ifelse(movers_only, "movers", "all"), "]: fold ", i,
-            "/", length(paired_folds))
+    message(model_name, " [", ifelse(movers_only, "movers", "all"),
+            "]: outer split ", i, "/", length(paired_folds))
   }
 
-  bind_rows(fold_results)
+  bind_rows(results)
 }
 
-# Nadeau-Bengio corrected paired test. With repeated k-fold CV, each paired
-# observation is one Current-minus-Birth difference from the same outer test fold.
-corrected_paired_test <- function(results, metric = "BSS", k = 5) {
-  paired <- results %>%
-    select(Model, Sample, Repeat, Fold, Outcome, all_of(metric)) %>%
-    pivot_wider(names_from = Outcome, values_from = all_of(metric)) %>%
-    mutate(Difference = Current - Birth)
+# ---- Stayer distinctiveness -------------------------------------------------
 
-  paired %>%
+run_stayer_analysis <- function(df, predictors, model_name, comparison,
+                                location = NA_character_) {
+  eligible <- switch(
+    comparison,
+    Overall = rep(TRUE, nrow(df)),
+    `Stayed vs moved away` = df$birth_location == location,
+    `Stayer vs moved in` = df$current_location == location,
+    stop("Unknown stayer comparison")
+  )
+  results <- vector("list", length(paired_folds))
+
+  for (i in seq_along(paired_folds)) {
+    split <- paired_folds[[i]]
+    train_rows <- split$train[eligible[split$train]]
+    test_rows <- split$test[eligible[split$test]]
+    train_y <- df$mobility[train_rows]
+    test_y <- df$mobility[test_rows]
+
+    # Very small location-specific folds cannot support a valid binary model.
+    train_class_counts <- table(factor(train_y, levels = c("Mover", "Stayer")))
+    if (any(train_class_counts < INNER_FOLDS) || length(test_rows) == 0) {
+      message("Skipping small stayer split: ", comparison, " / ",
+              ifelse(is.na(location), "All", location), " / split ", i)
+      results[[i]] <- NULL
+      next
+    }
+
+    x <- residualize_in_outer_fold(df, train_rows, test_rows, predictors)
+    fit <- fit_binary(x$train, x$test, train_y, test_y, seed = 3000 + i)
+    results[[i]] <- as.data.frame(as.list(fit$metrics)) %>%
+      mutate(
+        Model = model_name,
+        Comparison = comparison,
+        Location = if_else(is.na(location), "All", location),
+        Repeat = split$repeat_id,
+        Fold = split$fold,
+        TrainN = length(train_rows),
+        TestN = length(test_rows),
+        Lambda = fit$lambda
+      )
+  }
+
+  bind_rows(results)
+}
+
+run_all_stayer_analyses <- function(df, predictors, model_name) {
+  output <- list(
+    run_stayer_analysis(df, predictors, model_name, "Overall")
+  )
+  for (location in location_levels) {
+    output <- append(output, list(
+      run_stayer_analysis(
+        df, predictors, model_name, "Stayed vs moved away", location
+      ),
+      run_stayer_analysis(
+        df, predictors, model_name, "Stayer vs moved in", location
+      )
+    ))
+  }
+  bind_rows(output)
+}
+
+# ---- Corrected resampling inference ----------------------------------------
+
+corrected_birth_current_test <- function(results, k) {
+  results %>%
+    select(Model, Sample, Repeat, Fold, Outcome, BSS) %>%
+    pivot_wider(names_from = Outcome, values_from = BSS) %>%
+    mutate(Difference = Current - Birth) %>%
     group_by(Model, Sample) %>%
     summarize(
-      Metric = metric,
-      Birth = mean(Birth),
-      Current = mean(Current),
+      Birth_BSS = mean(Birth),
+      Current_BSS = mean(Current),
       Current_minus_Birth = mean(Difference),
       Corrected_SE = sqrt((1 / n() + 1 / (k - 1)) * var(Difference)),
       df = n() - 1,
       t = Current_minus_Birth / Corrected_SE,
-      p = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+      p = 2 * pt(abs(t), df, lower.tail = FALSE),
       CI_Lower = Current_minus_Birth - qt(0.975, df) * Corrected_SE,
       CI_Upper = Current_minus_Birth + qt(0.975, df) * Corrected_SE,
       .groups = "drop"
     )
 }
 
-# ---- Run analyses -----------------------------------------------------------
-
-all_results <- list(
-  run_paired_comparison(analysis_data, domain_predictors, "Big Five domains")
-)
-
-if (ANALYZE_MOVERS_ONLY) {
-  all_results <- append(all_results, list(
-    run_paired_comparison(analysis_data, domain_predictors, "Big Five domains", movers_only = TRUE)
-  ))
+corrected_stayer_summary <- function(results, k) {
+  results %>%
+    group_by(Model, Comparison, Location) %>%
+    summarize(
+      Mean_BSS = mean(BSS),
+      Mean_Balanced_Accuracy = mean(BalancedAccuracy),
+      Corrected_SE = sqrt((1 / n() + 1 / (k - 1)) * var(BSS)),
+      df = n() - 1,
+      t = Mean_BSS / Corrected_SE,
+      p = 2 * pt(abs(t), df, lower.tail = FALSE),
+      CI_Lower = Mean_BSS - qt(0.975, df) * Corrected_SE,
+      CI_Upper = Mean_BSS + qt(0.975, df) * Corrected_SE,
+      Resampling_Splits = n(),
+      .groups = "drop"
+    )
 }
 
+# ---- Run and save analysis --------------------------------------------------
+
+predictor_sets <- list("Big Five domains" = domain_predictors)
 if (RUN_ITEM_MODELS) {
-  all_results <- append(all_results, list(
-    run_paired_comparison(analysis_data, item_predictors, "Personality items")
-  ))
-
-  if (ANALYZE_MOVERS_ONLY) {
-    all_results <- append(all_results, list(
-      run_paired_comparison(analysis_data, item_predictors, "Personality items", movers_only = TRUE)
-    ))
-  }
+  predictor_sets[["Personality items"]] <- item_predictors
 }
 
-fold_metrics <- bind_rows(all_results)
-bss_comparison <- corrected_paired_test(fold_metrics, metric = "BSS", k = OUTER_FOLDS)
+birth_current_results <- bind_rows(lapply(names(predictor_sets), function(name) {
+  predictors <- predictor_sets[[name]]
+  bind_rows(
+    run_birth_current(analysis_data, predictors, name, movers_only = FALSE),
+    run_birth_current(analysis_data, predictors, name, movers_only = TRUE)
+  )
+}))
 
-metric_summary <- fold_metrics %>%
+stayer_results <- bind_rows(lapply(names(predictor_sets), function(name) {
+  run_all_stayer_analyses(analysis_data, predictor_sets[[name]], name)
+}))
+
+birth_current_summary <- birth_current_results %>%
   group_by(Model, Sample, Outcome) %>%
   summarize(
     across(c(BSS, Brier, LogLoss, Accuracy, BalancedAccuracy), mean),
     .groups = "drop"
   )
 
-print(metric_summary)
-print(bss_comparison)
+birth_current_test <- corrected_birth_current_test(
+  birth_current_results, OUTER_FOLDS
+)
+stayer_summary <- corrected_stayer_summary(stayer_results, OUTER_FOLDS)
 
-write.csv(fold_metrics, "basic_fold_metrics.csv", row.names = FALSE)
-write.csv(metric_summary, "basic_metric_summary.csv", row.names = FALSE)
-write.csv(bss_comparison, "basic_birth_current_bss_comparison.csv", row.names = FALSE)
+print(birth_current_summary)
+print(birth_current_test)
+print(stayer_summary)
 
-# Positive Current_minus_Birth means personality predicts current location better.
-# Negative Current_minus_Birth means personality predicts birth location better.
-p <- ggplot(metric_summary, aes(x = Outcome, y = BSS, fill = Outcome)) +
-  geom_col(width = 0.65) +
-  facet_grid(Sample ~ Model) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
-  scale_fill_manual(values = c(Birth = "#0072B2", Current = "#D55E00")) +
-  labs(
-    title = "Does Personality Better Predict Birth or Current Location?",
-    subtitle = "Paired out-of-sample multiclass Brier skill scores",
-    x = NULL,
-    y = "Brier Skill Score"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "none", strip.text = element_text(face = "bold"))
+write.csv(
+  birth_current_results, "basic_birth_current_fold_results.csv", row.names = FALSE
+)
+write.csv(
+  birth_current_summary, "basic_birth_current_summary.csv", row.names = FALSE
+)
+write.csv(
+  birth_current_test, "basic_birth_current_corrected_test.csv", row.names = FALSE
+)
+write.csv(
+  stayer_results, "basic_stayer_fold_results.csv", row.names = FALSE
+)
+write.csv(
+  stayer_summary, "basic_stayer_summary.csv", row.names = FALSE
+)
 
-ggsave("basic_birth_vs_current_bss.png", p, width = 9, height = 6, dpi = 300)
-
-message("Saved fold metrics, summaries, corrected comparisons, and BSS plot.")
+message("Analysis complete. Five result CSV files were saved; no plots were created.")
