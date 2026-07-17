@@ -313,6 +313,30 @@ multiclass_metrics <- function(actual, probabilities, baseline) {
   )
 }
 
+# Decompose the joint multinomial predictions into one-versus-rest BSS values.
+# No separate binary models are fitted: each score uses the probability produced
+# by the four-class model and the matching outer-training class prevalence.
+settlement_bss <- function(actual, probabilities, baseline) {
+  actual <- factor(actual, levels = location_levels)
+  probabilities <- probabilities[, location_levels, drop = FALSE]
+
+  bind_rows(lapply(location_levels, function(settlement) {
+    observed <- as.numeric(actual == settlement)
+    model_brier <- mean((probabilities[, settlement] - observed)^2)
+    baseline_probability <- as.numeric(baseline[settlement])
+    baseline_brier <- mean((baseline_probability - observed)^2)
+
+    tibble(
+      Settlement = settlement,
+      BSS = 1 - model_brier / baseline_brier,
+      Brier = model_brier,
+      Baseline_Brier = baseline_brier,
+      Training_Prevalence = baseline_probability,
+      Test_Prevalence = mean(observed)
+    )
+  }))
+}
+
 binary_metrics <- function(actual, probability, baseline) {
   actual <- as.numeric(actual == "Stayer")
   predicted <- if_else(probability >= 0.5, 1, 0)
@@ -399,6 +423,7 @@ fit_multinomial <- function(train_x, test_x, train_y, test_y, seed) {
 
   list(
     metrics = multiclass_metrics(test_y, probability, baseline),
+    settlement_bss = settlement_bss(test_y, probability, baseline),
     lambda = fit$lambda.1se,
     coefficients = extract_multinomial_coefficients(fit)
   )
@@ -437,6 +462,7 @@ run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
   folds_to_use <- if (movers_only) mover_folds else paired_folds
   results <- vector("list", length(folds_to_use))
   coefficient_results <- vector("list", length(folds_to_use))
+  settlement_results <- vector("list", length(folds_to_use))
 
   for (i in seq_along(folds_to_use)) {
     split <- folds_to_use[[i]]
@@ -479,13 +505,26 @@ run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
         Fold = split$fold
       )
 
+    settlement_results[[i]] <- bind_rows(
+      birth$settlement_bss %>% mutate(Outcome = "Birth"),
+      current$settlement_bss %>% mutate(Outcome = "Current")
+    ) %>%
+      mutate(
+        Model = model_name,
+        Sample = if_else(movers_only, "Movers only", "All participants"),
+        Repeat = split$repeat_id,
+        Fold = split$fold,
+        TestN = length(test_rows)
+      )
+
     message(model_name, " [", ifelse(movers_only, "movers", "all"),
             "]: outer split ", i, "/", length(folds_to_use))
   }
 
   list(
     metrics = bind_rows(results),
-    coefficients = bind_rows(coefficient_results)
+    coefficients = bind_rows(coefficient_results),
+    settlement_bss = bind_rows(settlement_results)
   )
 }
 
@@ -591,6 +630,34 @@ corrected_birth_current_test <- function(results, k) {
     )
 }
 
+corrected_settlement_tests <- function(results, k) {
+  tests <- results %>%
+    select(Model, Sample, Settlement, Repeat, Fold, Outcome, BSS) %>%
+    pivot_wider(names_from = Outcome, values_from = BSS) %>%
+    mutate(Difference = Current - Birth) %>%
+    group_by(Model, Sample, Settlement) %>%
+    summarize(
+      Birth_BSS = mean(Birth),
+      Current_BSS = mean(Current),
+      Current_minus_Birth = mean(Difference),
+      Corrected_SE = sqrt((1 / n() + 1 / (k - 1)) * var(Difference)),
+      df = n() - 1,
+      t = Current_minus_Birth / Corrected_SE,
+      p = 2 * pt(abs(t), df, lower.tail = FALSE),
+      CI_Lower = Current_minus_Birth - qt(0.975, df) * Corrected_SE,
+      CI_Upper = Current_minus_Birth + qt(0.975, df) * Corrected_SE,
+      Resampling_Splits = n(),
+      .groups = "drop"
+    )
+
+  # Four settlement tests form one multiplicity family within each predictor
+  # model and analysis sample.
+  tests %>%
+    group_by(Model, Sample) %>%
+    mutate(p_Holm = p.adjust(p, method = "holm")) %>%
+    ungroup()
+}
+
 corrected_stayer_summary <- function(results, k) {
   results %>%
     group_by(Model, Comparison, Location) %>%
@@ -631,6 +698,9 @@ birth_current_results <- bind_rows(lapply(birth_current_runs, `[[`, "metrics"))
 birth_current_coefficients <- bind_rows(
   lapply(birth_current_runs, `[[`, "coefficients")
 )
+settlement_bss_results <- bind_rows(
+  lapply(birth_current_runs, `[[`, "settlement_bss")
+)
 stayer_results <- bind_rows(lapply(stayer_runs, `[[`, "metrics"))
 stayer_coefficients <- bind_rows(lapply(stayer_runs, `[[`, "coefficients"))
 
@@ -643,6 +713,19 @@ birth_current_summary <- birth_current_results %>%
 
 birth_current_test <- corrected_birth_current_test(
   birth_current_results, OUTER_FOLDS
+)
+settlement_bss_summary <- settlement_bss_results %>%
+  group_by(Model, Sample, Outcome, Settlement) %>%
+  summarize(
+    BSS = mean(BSS),
+    Brier = mean(Brier),
+    Baseline_Brier = mean(Baseline_Brier),
+    Training_Prevalence = mean(Training_Prevalence),
+    Test_Prevalence = mean(Test_Prevalence),
+    .groups = "drop"
+  )
+settlement_bss_tests <- corrected_settlement_tests(
+  settlement_bss_results, OUTER_FOLDS
 )
 stayer_summary <- corrected_stayer_summary(stayer_results, OUTER_FOLDS)
 
@@ -683,6 +766,8 @@ stayer_coefficient_summary <- summarize_coefficients(
 
 print(birth_current_summary)
 print(birth_current_test)
+print(settlement_bss_summary)
+print(settlement_bss_tests)
 print(stayer_summary)
 print(birth_current_coefficient_summary)
 print(stayer_coefficient_summary)
@@ -695,6 +780,21 @@ write.csv(
 )
 write.csv(
   birth_current_test, "basic_birth_current_corrected_test.csv", row.names = FALSE
+)
+write.csv(
+  settlement_bss_results,
+  "basic_settlement_bss_fold_results.csv",
+  row.names = FALSE
+)
+write.csv(
+  settlement_bss_summary,
+  "basic_settlement_bss_summary.csv",
+  row.names = FALSE
+)
+write.csv(
+  settlement_bss_tests,
+  "basic_settlement_bss_corrected_tests.csv",
+  row.names = FALSE
 )
 write.csv(
   stayer_results, "basic_stayer_fold_results.csv", row.names = FALSE
