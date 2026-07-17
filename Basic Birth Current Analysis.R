@@ -256,9 +256,26 @@ residualize_in_outer_fold <- function(df, train_rows, test_rows, predictors) {
   adjustment <- lm.fit(x = covariate_train, y = train_x)$coefficients
   adjustment[!is.finite(adjustment)] <- 0
 
+  train_residuals <- train_x - covariate_train %*% adjustment
+  test_residuals <- test_x - covariate_test %*% adjustment
+
+  # Standardize using outer-training residuals so extracted coefficients describe
+  # a one-SD increase in an age/gender-residualized personality predictor.
+  training_means <- colMeans(train_residuals)
+  training_sds <- apply(train_residuals, 2, sd)
+  if (any(!is.finite(training_sds) | training_sds == 0)) {
+    stop("A residualized predictor has zero or undefined training-fold variance")
+  }
+
   list(
-    train = train_x - covariate_train %*% adjustment,
-    test = test_x - covariate_test %*% adjustment
+    train = sweep(
+      sweep(train_residuals, 2, training_means, "-"),
+      2, training_sds, "/"
+    ),
+    test = sweep(
+      sweep(test_residuals, 2, training_means, "-"),
+      2, training_sds, "/"
+    )
   )
 }
 
@@ -316,6 +333,29 @@ binary_metrics <- function(actual, probability, baseline) {
 
 # ---- Model fitting ----------------------------------------------------------
 
+extract_multinomial_coefficients <- function(fit) {
+  coefficient_list <- coef(fit, s = "lambda.1se")
+  bind_rows(lapply(names(coefficient_list), function(class_name) {
+    coefficient_matrix <- as.matrix(coefficient_list[[class_name]])
+    tibble(
+      Predictor = rownames(coefficient_matrix),
+      Class = class_name,
+      Coefficient = as.numeric(coefficient_matrix[, 1])
+    ) %>%
+      filter(Predictor != "(Intercept)")
+  }))
+}
+
+extract_binary_coefficients <- function(fit) {
+  coefficient_matrix <- as.matrix(coef(fit, s = "lambda.1se"))
+  tibble(
+    Predictor = rownames(coefficient_matrix),
+    Class = "Stayer vs Mover",
+    Coefficient = as.numeric(coefficient_matrix[, 1])
+  ) %>%
+    filter(Predictor != "(Intercept)")
+}
+
 make_inner_foldid <- function(y, k, seed) {
   y <- droplevels(factor(y))
   if (any(table(y) < k)) {
@@ -350,7 +390,7 @@ fit_multinomial <- function(train_x, test_x, train_y, test_y, seed) {
     alpha = ELASTIC_NET_ALPHA,
     foldid = inner_foldid,
     type.measure = "deviance",
-    standardize = TRUE
+    standardize = FALSE
   )
 
   probability <- predict(
@@ -359,7 +399,8 @@ fit_multinomial <- function(train_x, test_x, train_y, test_y, seed) {
 
   list(
     metrics = multiclass_metrics(test_y, probability, baseline),
-    lambda = fit$lambda.1se
+    lambda = fit$lambda.1se,
+    coefficients = extract_multinomial_coefficients(fit)
   )
 }
 
@@ -377,7 +418,7 @@ fit_binary <- function(train_x, test_x, train_y, test_y, seed) {
     alpha = ELASTIC_NET_ALPHA,
     foldid = inner_foldid,
     type.measure = "deviance",
-    standardize = TRUE
+    standardize = FALSE
   )
   probability <- as.numeric(predict(
     fit, newx = test_x, s = "lambda.1se", type = "response"
@@ -385,7 +426,8 @@ fit_binary <- function(train_x, test_x, train_y, test_y, seed) {
 
   list(
     metrics = binary_metrics(test_y, probability, baseline),
-    lambda = fit$lambda.1se
+    lambda = fit$lambda.1se,
+    coefficients = extract_binary_coefficients(fit)
   )
 }
 
@@ -394,6 +436,7 @@ fit_binary <- function(train_x, test_x, train_y, test_y, seed) {
 run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
   folds_to_use <- if (movers_only) mover_folds else paired_folds
   results <- vector("list", length(folds_to_use))
+  coefficient_results <- vector("list", length(folds_to_use))
 
   for (i in seq_along(folds_to_use)) {
     split <- folds_to_use[[i]]
@@ -425,11 +468,25 @@ run_birth_current <- function(df, predictors, model_name, movers_only = FALSE) {
         TestN = length(test_rows)
       )
 
+    coefficient_results[[i]] <- bind_rows(
+      birth$coefficients %>% mutate(Outcome = "Birth"),
+      current$coefficients %>% mutate(Outcome = "Current")
+    ) %>%
+      mutate(
+        Model = model_name,
+        Sample = if_else(movers_only, "Movers only", "All participants"),
+        Repeat = split$repeat_id,
+        Fold = split$fold
+      )
+
     message(model_name, " [", ifelse(movers_only, "movers", "all"),
             "]: outer split ", i, "/", length(folds_to_use))
   }
 
-  bind_rows(results)
+  list(
+    metrics = bind_rows(results),
+    coefficients = bind_rows(coefficient_results)
+  )
 }
 
 # ---- Stayer distinctiveness -------------------------------------------------
@@ -444,6 +501,7 @@ run_stayer_analysis <- function(df, predictors, model_name, comparison,
     stop("Unknown stayer comparison")
   )
   results <- vector("list", length(paired_folds))
+  coefficient_results <- vector("list", length(paired_folds))
 
   for (i in seq_along(paired_folds)) {
     split <- paired_folds[[i]]
@@ -474,9 +532,21 @@ run_stayer_analysis <- function(df, predictors, model_name, comparison,
         TestN = length(test_rows),
         Lambda = fit$lambda
       )
+
+    coefficient_results[[i]] <- fit$coefficients %>%
+      mutate(
+        Model = model_name,
+        Comparison = comparison,
+        Location = if_else(is.na(location), "All", location),
+        Repeat = split$repeat_id,
+        Fold = split$fold
+      )
   }
 
-  bind_rows(results)
+  list(
+    metrics = bind_rows(results),
+    coefficients = bind_rows(coefficient_results)
+  )
 }
 
 run_all_stayer_analyses <- function(df, predictors, model_name) {
@@ -493,7 +563,10 @@ run_all_stayer_analyses <- function(df, predictors, model_name) {
       )
     ))
   }
-  bind_rows(output)
+  list(
+    metrics = bind_rows(lapply(output, `[[`, "metrics")),
+    coefficients = bind_rows(lapply(output, `[[`, "coefficients"))
+  )
 }
 
 # ---- Corrected resampling inference ----------------------------------------
@@ -542,17 +615,24 @@ if (RUN_ITEM_MODELS) {
   predictor_sets[["Personality items"]] <- item_predictors
 }
 
-birth_current_results <- bind_rows(lapply(names(predictor_sets), function(name) {
+birth_current_runs <- unlist(lapply(names(predictor_sets), function(name) {
   predictors <- predictor_sets[[name]]
-  bind_rows(
+  list(
     run_birth_current(data, predictors, name, movers_only = FALSE),
     run_birth_current(data, predictors, name, movers_only = TRUE)
   )
-}))
+}), recursive = FALSE)
 
-stayer_results <- bind_rows(lapply(names(predictor_sets), function(name) {
+stayer_runs <- lapply(names(predictor_sets), function(name) {
   run_all_stayer_analyses(data, predictor_sets[[name]], name)
-}))
+})
+
+birth_current_results <- bind_rows(lapply(birth_current_runs, `[[`, "metrics"))
+birth_current_coefficients <- bind_rows(
+  lapply(birth_current_runs, `[[`, "coefficients")
+)
+stayer_results <- bind_rows(lapply(stayer_runs, `[[`, "metrics"))
+stayer_coefficients <- bind_rows(lapply(stayer_runs, `[[`, "coefficients"))
 
 birth_current_summary <- birth_current_results %>%
   group_by(Model, Sample, Outcome) %>%
@@ -566,9 +646,46 @@ birth_current_test <- corrected_birth_current_test(
 )
 stayer_summary <- corrected_stayer_summary(stayer_results, OUTER_FOLDS)
 
+summarize_coefficients <- function(coefficients, grouping_variables) {
+  coefficients %>%
+    group_by(across(all_of(c(grouping_variables, "Predictor", "Class")))) %>%
+    summarize(
+      Median_Coefficient = median(Coefficient),
+      Mean_Coefficient = mean(Coefficient),
+      Coefficient_SD = sd(Coefficient),
+      Selection_Frequency = mean(abs(Coefficient) > 1e-12),
+      Positive_Frequency = if_else(
+        any(abs(Coefficient) > 1e-12),
+        mean(Coefficient[abs(Coefficient) > 1e-12] > 0),
+        NA_real_
+      ),
+      Sign_Consistency = if_else(
+        any(abs(Coefficient) > 1e-12),
+        max(
+          mean(Coefficient[abs(Coefficient) > 1e-12] > 0),
+          mean(Coefficient[abs(Coefficient) > 1e-12] < 0)
+        ),
+        NA_real_
+      ),
+      Resampling_Splits = n(),
+      .groups = "drop"
+    )
+}
+
+birth_current_coefficient_summary <- summarize_coefficients(
+  birth_current_coefficients,
+  c("Model", "Sample", "Outcome")
+)
+stayer_coefficient_summary <- summarize_coefficients(
+  stayer_coefficients,
+  c("Model", "Comparison", "Location")
+)
+
 print(birth_current_summary)
 print(birth_current_test)
 print(stayer_summary)
+print(birth_current_coefficient_summary)
+print(stayer_coefficient_summary)
 
 write.csv(
   birth_current_results, "basic_birth_current_fold_results.csv", row.names = FALSE
@@ -585,5 +702,25 @@ write.csv(
 write.csv(
   stayer_summary, "basic_stayer_summary.csv", row.names = FALSE
 )
+write.csv(
+  birth_current_coefficients,
+  "basic_birth_current_fold_coefficients.csv",
+  row.names = FALSE
+)
+write.csv(
+  birth_current_coefficient_summary,
+  "basic_birth_current_coefficient_summary.csv",
+  row.names = FALSE
+)
+write.csv(
+  stayer_coefficients,
+  "basic_stayer_fold_coefficients.csv",
+  row.names = FALSE
+)
+write.csv(
+  stayer_coefficient_summary,
+  "basic_stayer_coefficient_summary.csv",
+  row.names = FALSE
+)
 
-message("Analysis complete. Five result CSV files were saved; no plots were created.")
+message("Analysis complete. Performance and coefficient CSV files were saved; no plots were created.")
