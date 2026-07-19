@@ -373,6 +373,12 @@ panel_bss_data <- bind_rows(
     Predictor_Model = factor(
       Predictor_Model,
       levels = c("Big Five domains", "Personality items")
+    ),
+    # Keep domain precision, but show every item BSS and CI to two decimals.
+    Panel_CI_Label = if_else(
+      Predictor_Model == "Personality items",
+      sprintf("%.2f [%.2f, %.2f]", Mean_BSS, CI_Lower, CI_Upper),
+      sprintf("%.4f [%.4f, %.4f]", Mean_BSS, CI_Lower, CI_Upper)
     )
   )
 
@@ -430,7 +436,7 @@ p_bss_panels <- ggplot(
     data = panel_bss_data,
     aes(
       y = CI_Label_Y,
-      label = CI_Label,
+      label = Panel_CI_Label,
       group = Series,
       vjust = CI_Label_VJust
     ),
