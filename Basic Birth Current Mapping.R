@@ -11,7 +11,7 @@ OUTER_FOLDS <- 5
 setwd(PROJECT_DIR)
 
 # Adjustable heatmap thresholds.
-ITEM_COEFFICIENT_THRESHOLD <- 0.03
+ITEM_COEFFICIENT_THRESHOLD <- 0.015
 ITEM_SELECTION_FREQUENCY_THRESHOLD <- 0.50
 ITEM_MIN_OCCURRENCES <- 3
 COEFFICIENT_COLOR_LIMIT <- 0.30
@@ -228,26 +228,26 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
   marker_data <- significance_markers %>%
     filter(Sample == sample_name) %>%
     select(-Y, -Top, -Marker_Order) %>%
+    mutate(
+      Plot_Model = recode(
+        Model,
+        "Big Five domains" = "Domains",
+        "Personality items" = "Items"
+      ),
+      Marker_Group = factor(Plot_Model, levels = c("Domains", "Items"))
+    ) %>%
     left_join(
       plot_data %>%
-        group_by(Sample, Category) %>%
+        group_by(Model, Sample, Category) %>%
         summarize(
           Top = max(CI_Upper, Mean_BSS, na.rm = TRUE),
           .groups = "drop"
         ),
-      by = c("Sample", "Category")
+      by = c("Plot_Model" = "Model", "Sample", "Category")
     ) %>%
-    arrange(Category, Model) %>%
-    group_by(Category) %>%
     mutate(
-      Marker_Order = row_number(),
-      Marker_Label = paste0(
-        if_else(Model == "Big Five domains", "Domains ", "Items "),
-        Marker
-      ),
-      Y = Top + Marker_Order * 0.07 * plot_range
-    ) %>%
-    ungroup()
+      Y = Top + 0.07 * plot_range
+    )
 
   plot <- ggplot(
     plot_data,
@@ -280,10 +280,14 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
     ) +
     geom_text(
       data = marker_data,
-      aes(x = Category, y = Y, label = Marker_Label),
+      aes(
+        x = Category, y = Y, label = Marker,
+        group = Marker_Group
+      ),
       inherit.aes = FALSE,
+      position = position_dodge(width = 0.90),
       fontface = "bold",
-      size = 3.3
+      size = 4
     ) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
     scale_fill_manual(values = c(
@@ -306,7 +310,7 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
     theme_minimal(base_size = 11) +
     theme(
       panel.grid.major.x = element_blank(),
-      axis.text.x = element_text(angle = 25, hjust = 1),
+      axis.text.x = element_text(angle = 0, hjust = 0.5),
       strip.text = element_text(face = "bold"),
       legend.position = "bottom",
       plot.title = element_text(face = "bold", hjust = 0.5),
