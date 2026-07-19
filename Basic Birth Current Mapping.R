@@ -205,7 +205,8 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
         Model == "Items",
         sprintf("%.3f\n[%.3f, %.3f]", Mean_BSS, CI_Lower, CI_Upper),
         sprintf("%.4f\n[%.4f, %.4f]", Mean_BSS, CI_Lower, CI_Upper)
-      )
+      ),
+      Category_X = as.numeric(Category)
     )
 
   plot_range <- diff(range(
@@ -233,8 +234,7 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
         Model,
         "Big Five domains" = "Domains",
         "Personality items" = "Items"
-      ),
-      Marker_Group = factor(Plot_Model, levels = c("Domains", "Items"))
+      )
     ) %>%
     left_join(
       plot_data %>%
@@ -246,12 +246,17 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
       by = c("Plot_Model" = "Model", "Sample", "Category")
     ) %>%
     mutate(
+      # With four bars dodged across width 0.90, the pair midpoints are
+      # 0.225 category units to the left/right of the category center.
+      Marker_X = as.numeric(Category) + if_else(
+        Plot_Model == "Domains", -0.225, 0.225
+      ),
       Y = Top + 0.07 * plot_range
     )
 
   plot <- ggplot(
     plot_data,
-    aes(x = Category, y = Mean_BSS, fill = Series)
+    aes(x = Category_X, y = Mean_BSS, fill = Series)
   ) +
     geom_col(
       position = position_dodge(width = 0.90),
@@ -281,11 +286,9 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
     geom_text(
       data = marker_data,
       aes(
-        x = Category, y = Y, label = Marker,
-        group = Marker_Group
+        x = Marker_X, y = Y, label = Marker
       ),
       inherit.aes = FALSE,
-      position = position_dodge(width = 0.90),
       fontface = "bold",
       size = 4
     ) +
@@ -296,6 +299,11 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
       "Items Birth" = "#7FB8E6",
       "Items Current" = "#0072CE"
     )) +
+    scale_x_continuous(
+      breaks = seq_along(levels(plot_data$Category)),
+      labels = levels(plot_data$Category),
+      expand = expansion(add = 0.55)
+    ) +
     labs(
       title = title,
       x = NULL,
