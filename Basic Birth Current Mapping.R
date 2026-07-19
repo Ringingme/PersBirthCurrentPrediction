@@ -291,10 +291,10 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
     ) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
     scale_fill_manual(values = c(
-      "Domains Birth" = "#9ECAE1",
-      "Domains Current" = "#3182BD",
-      "Items Birth" = "#FDD0A2",
-      "Items Current" = "#E6550D"
+      "Domains Birth" = "#8C8C8C",
+      "Domains Current" = "#000000",
+      "Items Birth" = "#7FB8E6",
+      "Items Current" = "#0072CE"
     )) +
     labs(
       title = title,
