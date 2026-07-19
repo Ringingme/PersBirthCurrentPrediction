@@ -348,6 +348,133 @@ p_bss_items <- make_separate_bss_plot(
   "figure_bss_items.png"
 )
 
+# One combined PNG with domains and items in separate rows. Free y scales retain
+# the visibility of the small domain scores while keeping a single figure file.
+panel_bss_data <- bind_rows(
+  bss_figure_data %>%
+    filter(Model == "Domains") %>%
+    mutate(Predictor_Model = "Big Five domains"),
+  bss_figure_data %>%
+    filter(Model == "Items") %>%
+    mutate(Predictor_Model = "Personality items"),
+  bss_figure_data %>%
+    filter(Model == "Featureless") %>%
+    mutate(Predictor_Model = "Big Five domains"),
+  bss_figure_data %>%
+    filter(Model == "Featureless") %>%
+    mutate(Predictor_Model = "Personality items")
+) %>%
+  mutate(
+    Predictor_Model = factor(
+      Predictor_Model,
+      levels = c("Big Five domains", "Personality items")
+    )
+  )
+
+panel_significance <- significance_markers %>%
+  mutate(
+    Predictor_Model = if_else(
+      Marker == "D*", "Big Five domains", "Personality items"
+    ),
+    Predictor_Model = factor(
+      Predictor_Model,
+      levels = c("Big Five domains", "Personality items")
+    ),
+    Marker = "*"
+  ) %>%
+  select(-Y, -Top, -Marker_Order) %>%
+  left_join(
+    panel_bss_data %>%
+      filter(Model != "Featureless") %>%
+      group_by(Predictor_Model, Sample, Category) %>%
+      summarize(Top = max(CI_Upper, Mean_BSS, na.rm = TRUE), .groups = "drop"),
+    by = c("Predictor_Model", "Sample", "Category")
+  ) %>%
+  group_by(Predictor_Model) %>%
+  mutate(
+    Panel_Range = diff(range(
+      c(
+        panel_bss_data$CI_Lower[
+          panel_bss_data$Predictor_Model == first(Predictor_Model)
+        ],
+        panel_bss_data$CI_Upper[
+          panel_bss_data$Predictor_Model == first(Predictor_Model)
+        ]
+      ),
+      na.rm = TRUE
+    )),
+    Panel_Range = if_else(
+      is.finite(Panel_Range) & Panel_Range > 0,
+      Panel_Range,
+      0.01
+    ),
+    Y = Top + 0.06 * Panel_Range
+  ) %>%
+  ungroup()
+
+p_bss_panels <- ggplot(
+  panel_bss_data,
+  aes(x = Category, y = Mean_BSS, fill = Series)
+) +
+  geom_col(
+    position = position_dodge(width = 0.82), width = 0.72,
+    color = "grey25", linewidth = 0.18
+  ) +
+  geom_errorbar(
+    aes(ymin = CI_Lower, ymax = CI_Upper),
+    position = position_dodge(width = 0.82),
+    width = 0.12, linewidth = 0.5
+  ) +
+  geom_point(
+    data = panel_bss_data %>% filter(Model == "Featureless"),
+    position = position_dodge(width = 0.82),
+    shape = 21, size = 1.8, stroke = 0.5, color = "black"
+  ) +
+  geom_text(
+    data = panel_significance,
+    aes(x = Category, y = Y, label = Marker),
+    inherit.aes = FALSE, fontface = "bold", size = 4
+  ) +
+  facet_grid(
+    rows = vars(Predictor_Model),
+    cols = vars(Sample),
+    scales = "free_y"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
+  scale_fill_manual(values = c(
+    "Featureless Birth" = "#D9D9D9",
+    "Featureless Current" = "#969696",
+    "Domains Birth" = "#9ECAE1",
+    "Domains Current" = "#3182BD",
+    "Items Birth" = "#FDD0A2",
+    "Items Current" = "#E6550D"
+  )) +
+  labs(
+    title = "Personality Prediction of Birth and Current Residence",
+    subtitle = paste0(
+      "Domain and item panels use separate y scales. BSS with corrected 95% ",
+      "CIs; * significant birth-current difference."
+    ),
+    x = NULL, y = "Brier Skill Score", fill = NULL
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    strip.text = element_text(face = "bold"),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+ggsave(
+  "figure_bss_domains_items_panels.png",
+  p_bss_panels,
+  width = 16,
+  height = 10,
+  dpi = 300
+)
+
 # =============================================================================
 # FIGURE 2: DOMAIN AND THRESHOLDED ITEM COEFFICIENT HEATMAP
 # =============================================================================
