@@ -40,6 +40,18 @@ if (length(missing_settlement_columns)) {
     paste(missing_settlement_columns, collapse = ", ")
   )
 }
+required_coefficient_columns <- c(
+  "Model", "Sample", "Outcome", "Predictor", "Class", "Median_Coefficient"
+)
+missing_coefficient_columns <- setdiff(
+  required_coefficient_columns, names(coefficient_summary)
+)
+if (length(missing_coefficient_columns)) {
+  stop(
+    "The coefficient summary is missing required columns: ",
+    paste(missing_coefficient_columns, collapse = ", ")
+  )
+}
 
 location_levels <- c("Village", "Town", "City", "Abroad")
 heatmap_condition_levels <- unlist(lapply(location_levels, function(location) {
@@ -337,6 +349,88 @@ p_bss_movers_only <- make_sample_bss_plot(
 )
 
 # =============================================================================
+# TABLE: BIRTH-CURRENT COEFFICIENT CONSISTENCY
+# =============================================================================
+
+# Correlate matched birth and current coefficient profiles. Settlement-specific
+# rows correlate predictors within one settlement; overall rows pool the matched
+# predictor-settlement coefficients across all four settlements.
+paired_coefficients <- coefficient_summary %>%
+  select(Model, Sample, Predictor, Class, Outcome, Median_Coefficient) %>%
+  group_by(Model, Sample, Predictor, Class, Outcome) %>%
+  summarize(Coefficient = mean(Median_Coefficient), .groups = "drop") %>%
+  pivot_wider(names_from = Outcome, values_from = Coefficient) %>%
+  filter(is.finite(Birth), is.finite(Current))
+
+safe_correlation <- function(birth, current, method) {
+  complete <- is.finite(birth) & is.finite(current)
+  birth <- birth[complete]
+  current <- current[complete]
+
+  if (length(birth) < 3 || sd(birth) == 0 || sd(current) == 0) {
+    return(tibble(Estimate = NA_real_, p = NA_real_))
+  }
+
+  test <- suppressWarnings(cor.test(
+    birth,
+    current,
+    method = method,
+    exact = FALSE
+  ))
+  tibble(Estimate = unname(test$estimate), p = test$p.value)
+}
+
+summarize_coefficient_consistency <- function(data) {
+  pearson <- safe_correlation(data$Birth, data$Current, "pearson")
+  spearman <- safe_correlation(data$Birth, data$Current, "spearman")
+
+  tibble(
+    Matched_Coefficients = nrow(data),
+    Pearson_r = pearson$Estimate,
+    Pearson_p = pearson$p,
+    Spearman_rho = spearman$Estimate,
+    Spearman_p = spearman$p
+  )
+}
+
+settlement_coefficient_consistency <- paired_coefficients %>%
+  group_by(Model, Sample, Class) %>%
+  group_modify(~ summarize_coefficient_consistency(.x)) %>%
+  ungroup() %>%
+  rename(Settlement = Class)
+
+overall_coefficient_consistency <- paired_coefficients %>%
+  group_by(Model, Sample) %>%
+  group_modify(~ summarize_coefficient_consistency(.x)) %>%
+  ungroup() %>%
+  mutate(Settlement = "Overall pooled")
+
+coefficient_consistency_table <- bind_rows(
+  settlement_coefficient_consistency,
+  overall_coefficient_consistency
+) %>%
+  group_by(Model, Sample) %>%
+  mutate(
+    Pearson_p_Holm = p.adjust(Pearson_p, method = "holm"),
+    Spearman_p_Holm = p.adjust(Spearman_p, method = "holm")
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Settlement = factor(
+      Settlement,
+      levels = c(location_levels, "Overall pooled")
+    )
+  ) %>%
+  arrange(Model, Sample, Settlement)
+
+print(coefficient_consistency_table)
+write.csv(
+  coefficient_consistency_table,
+  "coefficient_birth_current_consistency.csv",
+  row.names = FALSE
+)
+
+# =============================================================================
 # FIGURE 2: DOMAIN AND CONDITION-SPECIFIC TOP-20 ITEM COEFFICIENT HEATMAP
 # =============================================================================
 
@@ -502,5 +596,8 @@ write.csv(
 )
 
 message(
-  "Saved separate whole-sample and movers-only BSS and coefficient figures."
+  paste0(
+    "Saved separate whole-sample and movers-only BSS and coefficient figures, ",
+    "plus the birth-current coefficient-consistency table."
+  )
 )
