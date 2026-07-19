@@ -10,10 +10,8 @@ PROJECT_DIR <- "/data/scripts/Ling/Proj5BirthCurrentPrediction/"
 OUTER_FOLDS <- 5
 setwd(PROJECT_DIR)
 
-# Adjustable heatmap thresholds.
-ITEM_COEFFICIENT_THRESHOLD <- 0.015
-ITEM_SELECTION_FREQUENCY_THRESHOLD <- 0.50
-ITEM_MIN_OCCURRENCES <- 3
+# Adjustable heatmap settings.
+TOP_ITEMS_PER_CONDITION <- 20
 COEFFICIENT_COLOR_LIMIT <- 0.30
 
 # ---- Read analysis outputs --------------------------------------------------
@@ -339,7 +337,7 @@ p_bss_movers_only <- make_sample_bss_plot(
 )
 
 # =============================================================================
-# FIGURE 2: DOMAIN AND THRESHOLDED ITEM COEFFICIENT HEATMAP
+# FIGURE 2: DOMAIN AND CONDITION-SPECIFIC TOP-20 ITEM COEFFICIENT HEATMAP
 # =============================================================================
 
 coefficient_heatmap_data <- coefficient_summary %>%
@@ -349,65 +347,63 @@ coefficient_heatmap_data <- coefficient_summary %>%
       "Big Five domains" = "Domains",
       "Personality items" = "Items"
     ),
-    Passes_Item_Threshold =
-      abs(Median_Coefficient) >= ITEM_COEFFICIENT_THRESHOLD &
-      Selection_Frequency >= ITEM_SELECTION_FREQUENCY_THRESHOLD
+    Class = factor(Class, levels = location_levels),
+    Outcome = factor(Outcome, levels = c("Birth", "Current")),
+    Condition = factor(
+      paste(Class, Outcome, sep = "\n"),
+      levels = heatmap_condition_levels
+    )
   )
 
-selected_items_table <- coefficient_heatmap_data %>%
+# Rank items independently within every sample, outcome, and settlement cell.
+# Therefore, rank 1 can refer to a different item in every heatmap column.
+top_item_coefficients <- coefficient_heatmap_data %>%
   filter(Predictor_Set == "Items") %>%
-  group_by(Sample, Predictor) %>%
-  summarize(
-    Occurrences = sum(Passes_Item_Threshold),
-    Maximum_Absolute_Coefficient = max(abs(Median_Coefficient)),
-    .groups = "drop"
+  group_by(Sample, Outcome, Class) %>%
+  arrange(desc(abs(Median_Coefficient)), Predictor, .by_group = TRUE) %>%
+  slice_head(n = TOP_ITEMS_PER_CONDITION) %>%
+  mutate(
+    Item_Rank = row_number(),
+    Heatmap_Row = sprintf("Item rank %02d", Item_Rank),
+    Cell_Label = Predictor
   ) %>%
-  filter(Occurrences >= ITEM_MIN_OCCURRENCES) %>%
-  arrange(Sample, desc(Occurrences), desc(Maximum_Absolute_Coefficient))
+  ungroup()
 
 make_coefficient_heatmap <- function(sample_name, title, filename) {
-  selected_items <- selected_items_table %>%
-    filter(Sample == sample_name) %>%
-    pull(Predictor)
-
-  if (length(selected_items) == 0) {
-    warning(
-      "No items passed the heatmap thresholds for ", sample_name,
-      "; reduce one or more item thresholds"
-    )
-  }
-
-  domain_predictors <- coefficient_heatmap_data %>%
+  domain_data <- coefficient_heatmap_data %>%
     filter(Predictor_Set == "Domains", Sample == sample_name) %>%
+    mutate(
+      Heatmap_Row = Predictor,
+      Cell_Label = ""
+    )
+
+  item_data <- top_item_coefficients %>%
+    filter(Sample == sample_name)
+
+  domain_order <- domain_data %>%
     distinct(Predictor) %>%
     pull(Predictor)
+  item_rank_order <- sprintf(
+    "Item rank %02d",
+    seq_len(TOP_ITEMS_PER_CONDITION)
+  )
+  heatmap_row_order <- c(domain_order, item_rank_order)
 
-  heatmap_predictor_order <- c(domain_predictors, selected_items)
-
-  plot_data <- coefficient_heatmap_data %>%
-    filter(
-      Sample == sample_name,
-      Predictor_Set == "Domains" | Predictor %in% selected_items
-    ) %>%
+  plot_data <- bind_rows(domain_data, item_data) %>%
     mutate(
-      Plot_Coefficient = if_else(
-        Predictor_Set == "Items" & !Passes_Item_Threshold,
-        NA_real_,
-        Median_Coefficient
-      ),
       Predictor_Set = factor(Predictor_Set, levels = c("Domains", "Items")),
-      Predictor = factor(Predictor, levels = rev(heatmap_predictor_order)),
-      Class = factor(Class, levels = location_levels),
-      Outcome = factor(Outcome, levels = c("Birth", "Current")),
-      Condition = factor(
-        paste(Class, Outcome, sep = "\n"),
-        levels = heatmap_condition_levels
+      Heatmap_Row = factor(Heatmap_Row, levels = rev(heatmap_row_order)),
+      Plot_Coefficient = Median_Coefficient,
+      Text_Color = if_else(
+        abs(Plot_Coefficient) >= 0.15,
+        "white",
+        "black"
       )
     )
 
   plot <- ggplot(
     plot_data,
-    aes(x = Condition, y = Predictor, fill = Plot_Coefficient)
+    aes(x = Condition, y = Heatmap_Row, fill = Plot_Coefficient)
   ) +
     geom_tile(color = "white", linewidth = 0.25) +
     geom_vline(
@@ -415,11 +411,18 @@ make_coefficient_heatmap <- function(sample_name, title, filename) {
       color = "grey45",
       linewidth = 0.45
     ) +
+    geom_text(
+      data = plot_data %>% filter(Predictor_Set == "Items"),
+      aes(label = Cell_Label, color = Text_Color),
+      size = 2.15,
+      fontface = "plain",
+      show.legend = FALSE
+    ) +
     facet_grid(
       rows = vars(Predictor_Set),
       scales = "free_y",
       space = "free_y",
-      drop = FALSE
+      drop = TRUE
     ) +
     scale_fill_gradient2(
       low = "#3B4CC0",
@@ -428,17 +431,22 @@ make_coefficient_heatmap <- function(sample_name, title, filename) {
       midpoint = 0,
       limits = c(-COEFFICIENT_COLOR_LIMIT, COEFFICIENT_COLOR_LIMIT),
       oob = scales::squish,
-      na.value = "white",
       name = "Median\ncoefficient"
+    ) +
+    scale_color_identity() +
+    scale_y_discrete(
+      labels = function(labels) {
+        if_else(str_detect(labels, "^Item rank"), "", labels)
+      }
     ) +
     labs(
       title = title,
       subtitle = paste0(
-        "Items: |median coefficient| >= ", ITEM_COEFFICIENT_THRESHOLD,
-        ", selection frequency >= ", ITEM_SELECTION_FREQUENCY_THRESHOLD,
-        ", in >= ", ITEM_MIN_OCCURRENCES, " cells within this sample"
+        "The ", TOP_ITEMS_PER_CONDITION,
+        " largest absolute item coefficients are ranked separately ",
+        "within every settlement and outcome."
       ),
-      x = "Outcome and settlement type",
+      x = "Settlement and outcome",
       y = NULL
     ) +
     theme_minimal(base_size = 9) +
@@ -452,11 +460,11 @@ make_coefficient_heatmap <- function(sample_name, title, filename) {
       legend.position = "right"
     )
 
-  heatmap_height <- max(7, 4.5 + 0.20 * length(selected_items))
+  heatmap_height <- max(10, 5.5 + 0.32 * TOP_ITEMS_PER_CONDITION)
   ggsave(
     filename,
     plot,
-    width = 12,
+    width = 16,
     height = heatmap_height,
     dpi = 300,
     limitsize = FALSE
@@ -488,8 +496,8 @@ write.csv(
   row.names = FALSE
 )
 write.csv(
-  selected_items_table,
-  "figure_coefficient_heatmap_selected_items.csv",
+  top_item_coefficients,
+  "figure_coefficient_heatmap_top20_items.csv",
   row.names = FALSE
 )
 
