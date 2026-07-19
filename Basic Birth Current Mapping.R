@@ -298,11 +298,6 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
     )) +
     labs(
       title = title,
-      subtitle = paste0(
-        "BSS = 0 is the featureless reference. ",
-        "* p < .05, ** p < .01, *** p < .001; ",
-        "settlement p-values are Holm-adjusted."
-      ),
       x = NULL,
       y = "Brier Skill Score",
       fill = NULL
@@ -313,8 +308,7 @@ make_sample_bss_plot <- function(sample_name, title, filename) {
       axis.text.x = element_text(angle = 0, hjust = 0.5),
       strip.text = element_text(face = "bold"),
       legend.position = "bottom",
-      plot.title = element_text(face = "bold", hjust = 0.5),
-      plot.subtitle = element_text(hjust = 0.5)
+      plot.title = element_text(face = "bold", hjust = 0.5)
     )
 
   ggsave(filename, plot, width = 16, height = 9, dpi = 300)
