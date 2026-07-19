@@ -18,16 +18,12 @@ COEFFICIENT_COLOR_LIMIT <- 0.30
 
 # ---- Read analysis outputs --------------------------------------------------
 
-birth_current_results <- read.csv("basic_birth_current_fold_results.csv")
 settlement_bss_results <- read.csv("basic_settlement_bss_fold_results.csv")
-birth_current_test <- read.csv("basic_birth_current_corrected_test.csv")
 settlement_bss_tests <- read.csv("basic_settlement_bss_corrected_tests.csv")
 coefficient_summary <- read.csv("basic_birth_current_coefficient_summary.csv")
 
 required_files_data <- list(
-  birth_current_results = birth_current_results,
   settlement_bss_results = settlement_bss_results,
-  birth_current_test = birth_current_test,
   settlement_bss_tests = settlement_bss_tests,
   coefficient_summary = coefficient_summary
 )
@@ -67,7 +63,7 @@ non_abroad_macro_bss <- settlement_bss_results %>%
   filter(Settlement != "Abroad") %>%
   group_by(Model, Sample, Outcome, Repeat, Fold) %>%
   summarize(BSS = mean(BSS), .groups = "drop") %>%
-  mutate(Category = "Macro mean excl. Abroad")
+  mutate(Category = "Overall excl. Abroad (macro)")
 
 corrected_macro_test <- function(results, k = OUTER_FOLDS) {
   results %>%
@@ -97,8 +93,6 @@ write.csv(
 )
 
 trained_bss <- bind_rows(
-  birth_current_results %>%
-    transmute(Model, Sample, Outcome, Repeat, Fold, Category = "Overall", BSS),
   non_abroad_macro_bss %>%
     select(Model, Sample, Outcome, Repeat, Fold, Category, BSS),
   settlement_bss_results %>%
@@ -119,7 +113,7 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
   mutate(
     Category = factor(
       Category,
-      levels = c("Overall", "Macro mean excl. Abroad", location_levels)
+      levels = c("Overall excl. Abroad (macro)", location_levels)
     ),
     Model = recode(
       Model,
@@ -139,11 +133,9 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
 # Overall markers use the corrected paired p-value. Settlement markers use the
 # Holm-adjusted value across the four settlement tests in each model/sample.
 significance_markers <- bind_rows(
-  birth_current_test %>%
-    transmute(Model, Sample, Category = "Overall", p_for_marker = p),
   non_abroad_macro_test %>%
     transmute(
-      Model, Sample, Category = "Macro mean excl. Abroad",
+      Model, Sample, Category = "Overall excl. Abroad (macro)",
       p_for_marker = p
     ),
   settlement_bss_tests %>%
@@ -158,7 +150,7 @@ significance_markers <- bind_rows(
     ),
     Category = factor(
       Category,
-      levels = c("Overall", "Macro mean excl. Abroad", location_levels)
+      levels = c("Overall excl. Abroad (macro)", location_levels)
     )
   ) %>%
   left_join(
