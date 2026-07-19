@@ -127,7 +127,17 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
         "Domains Birth", "Domains Current",
         "Items Birth", "Items Current"
       )
-    )
+    ),
+    CI_Label = if_else(
+      Model == "Featureless",
+      NA_character_,
+      sprintf(
+        "%.4f\n[%.4f, %.4f]",
+        Mean_BSS, CI_Lower, CI_Upper
+      )
+    ),
+    CI_Label_Y = if_else(Mean_BSS >= 0, CI_Upper, CI_Lower),
+    CI_Label_VJust = if_else(Mean_BSS >= 0, -0.15, 1.15)
   )
 
 # Overall markers use the corrected paired p-value. Settlement markers use the
@@ -145,8 +155,8 @@ significance_markers <- bind_rows(
   mutate(
     Marker = recode(
       Model,
-      "Big Five domains" = "D*",
-      "Personality items" = "I*"
+      "Big Five domains" = "Domains*",
+      "Personality items" = "Items*"
     ),
     Category = factor(
       Category,
@@ -189,6 +199,20 @@ p_bss <- ggplot(
     width = 0.12,
     linewidth = 0.45
   ) +
+  geom_text(
+    data = bss_figure_data %>% filter(Model != "Featureless"),
+    aes(
+      y = CI_Label_Y,
+      label = CI_Label,
+      group = Series,
+      vjust = CI_Label_VJust
+    ),
+    position = position_dodge(width = 0.88),
+    angle = 90,
+    size = 2.2,
+    lineheight = 0.9,
+    show.legend = FALSE
+  ) +
   geom_point(
     data = bss_figure_data %>% filter(Model == "Featureless"),
     position = position_dodge(width = 0.88),
@@ -217,8 +241,8 @@ p_bss <- ggplot(
   labs(
     title = "Personality Prediction of Birth and Current Residence",
     subtitle = paste0(
-      "BSS with corrected 95% CIs; featureless BSS = 0. ",
-      "D*/I*: significant birth-current difference for domains/items; ",
+      "Labels show BSS [95% CI]; featureless BSS = 0 with CI [0, 0]. ",
+      "Domains*/Items*: significant birth-current difference; ",
       "settlement tests use Holm-adjusted p < .05."
     ),
     x = NULL,
@@ -286,6 +310,20 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
       position = position_dodge(width = 0.82),
       width = 0.12, linewidth = 0.5
     ) +
+    geom_text(
+      data = plot_data %>% filter(Model != "Featureless"),
+      aes(
+        y = CI_Label_Y,
+        label = CI_Label,
+        group = Series,
+        vjust = CI_Label_VJust
+      ),
+      position = position_dodge(width = 0.82),
+      angle = 90,
+      size = 2.3,
+      lineheight = 0.9,
+      show.legend = FALSE
+    ) +
     geom_point(
       data = plot_data %>% filter(Model == "Featureless"),
       position = position_dodge(width = 0.82),
@@ -309,7 +347,7 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
     labs(
       title = title,
       subtitle = paste0(
-        "BSS with corrected 95% CIs; featureless BSS = 0. ",
+        "Labels show BSS [95% CI]; featureless BSS = 0 with CI [0, 0]. ",
         "* significant birth-current difference; settlement tests use ",
         "Holm-adjusted p < .05."
       ),
@@ -330,12 +368,12 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
 }
 
 p_bss_domains <- make_separate_bss_plot(
-  "Domains", "D*",
+  "Domains", "Domains*",
   "Big Five Domain Prediction of Birth and Current Residence",
   "figure_bss_domains.png"
 )
 p_bss_items <- make_separate_bss_plot(
-  "Items", "I*",
+  "Items", "Items*",
   "Personality Item Prediction of Birth and Current Residence",
   "figure_bss_items.png"
 )
@@ -366,7 +404,7 @@ panel_bss_data <- bind_rows(
 panel_significance <- significance_markers %>%
   mutate(
     Predictor_Model = if_else(
-      Marker == "D*", "Big Five domains", "Personality items"
+      Marker == "Domains*", "Big Five domains", "Personality items"
     ),
     Predictor_Model = factor(
       Predictor_Model,
@@ -417,6 +455,20 @@ p_bss_panels <- ggplot(
     position = position_dodge(width = 0.82),
     width = 0.12, linewidth = 0.5
   ) +
+  geom_text(
+    data = panel_bss_data %>% filter(Model != "Featureless"),
+    aes(
+      y = CI_Label_Y,
+      label = CI_Label,
+      group = Series,
+      vjust = CI_Label_VJust
+    ),
+    position = position_dodge(width = 0.82),
+    angle = 90,
+    size = 2.1,
+    lineheight = 0.9,
+    show.legend = FALSE
+  ) +
   geom_point(
     data = panel_bss_data %>% filter(Model == "Featureless"),
     position = position_dodge(width = 0.82),
@@ -444,8 +496,8 @@ p_bss_panels <- ggplot(
   labs(
     title = "Personality Prediction of Birth and Current Residence",
     subtitle = paste0(
-      "Domain and item panels use separate y scales. BSS with corrected 95% ",
-      "CIs; * significant birth-current difference."
+      "Domain and item panels use separate y scales. Labels show BSS [95% CI]; ",
+      "featureless BSS = 0 with CI [0, 0]; * significant birth-current difference."
     ),
     x = NULL, y = "Brier Skill Score", fill = NULL
   ) +
