@@ -21,6 +21,9 @@ COEFFICIENT_COLOR_LIMIT <- 0.30
 birth_current_results <- read.csv("basic_birth_current_fold_results.csv")
 settlement_bss_results <- read.csv("basic_settlement_bss_fold_results.csv")
 birth_current_test <- read.csv("basic_birth_current_corrected_test.csv")
+birth_current_test_excluding_abroad <- read.csv(
+  "basic_birth_current_excluding_abroad_corrected_test.csv"
+)
 settlement_bss_tests <- read.csv("basic_settlement_bss_corrected_tests.csv")
 coefficient_summary <- read.csv("basic_birth_current_coefficient_summary.csv")
 
@@ -28,6 +31,8 @@ required_files_data <- list(
   birth_current_results = birth_current_results,
   settlement_bss_results = settlement_bss_results,
   birth_current_test = birth_current_test,
+  birth_current_test_excluding_abroad =
+    birth_current_test_excluding_abroad,
   settlement_bss_tests = settlement_bss_tests,
   coefficient_summary = coefficient_summary
 )
@@ -64,6 +69,12 @@ corrected_mean_ci <- function(scores, k = OUTER_FOLDS) {
 trained_bss <- bind_rows(
   birth_current_results %>%
     transmute(Model, Sample, Outcome, Repeat, Fold, Category = "Overall", BSS),
+  birth_current_results %>%
+    transmute(
+      Model, Sample, Outcome, Repeat, Fold,
+      Category = "Overall excl. Abroad",
+      BSS = BSS_Excluding_Abroad
+    ),
   settlement_bss_results %>%
     transmute(Model, Sample, Outcome, Repeat, Fold,
               Category = Settlement, BSS)
@@ -82,7 +93,7 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
   mutate(
     Category = factor(
       Category,
-      levels = c("Overall", location_levels)
+      levels = c("Overall", "Overall excl. Abroad", location_levels)
     ),
     Model = recode(
       Model,
@@ -104,6 +115,11 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
 significance_markers <- bind_rows(
   birth_current_test %>%
     transmute(Model, Sample, Category = "Overall", p_for_marker = p),
+  birth_current_test_excluding_abroad %>%
+    transmute(
+      Model, Sample, Category = "Overall excl. Abroad",
+      p_for_marker = p
+    ),
   settlement_bss_tests %>%
     transmute(Model, Sample, Category = Settlement, p_for_marker = p_Holm)
 ) %>%
@@ -114,7 +130,10 @@ significance_markers <- bind_rows(
       "Big Five domains" = "D*",
       "Personality items" = "I*"
     ),
-    Category = factor(Category, levels = c("Overall", location_levels))
+    Category = factor(
+      Category,
+      levels = c("Overall", "Overall excl. Abroad", location_levels)
+    )
   ) %>%
   left_join(
     bss_figure_data %>%
@@ -209,6 +228,116 @@ write.csv(
   bss_figure_data,
   "figure_bss_overall_settlements_data.csv",
   row.names = FALSE
+)
+
+# Separate domain and item figures use independent y-axis ranges so the much
+# smaller domain BSS values remain visible.
+make_separate_bss_plot <- function(target_model, marker_label, title, filename) {
+  plot_data <- bss_figure_data %>%
+    filter(Model %in% c("Featureless", target_model)) %>%
+    droplevels()
+
+  marker_data <- significance_markers %>%
+    filter(Marker == marker_label)
+
+  local_range <- diff(range(
+    c(plot_data$CI_Lower, plot_data$CI_Upper),
+    na.rm = TRUE
+  ))
+  if (!is.finite(local_range) || local_range == 0) local_range <- 0.01
+
+  marker_data <- marker_data %>%
+    select(-Y, -Top, -Marker_Order) %>%
+    left_join(
+      plot_data %>%
+        filter(Model != "Featureless") %>%
+        group_by(Sample, Category) %>%
+        summarize(
+          Top = max(CI_Upper, Mean_BSS, na.rm = TRUE),
+          .groups = "drop"
+        ),
+      by = c("Sample", "Category")
+    ) %>%
+    mutate(Y = Top + 0.06 * local_range)
+
+  plot <- ggplot(
+    plot_data,
+    aes(x = Category, y = Mean_BSS, fill = Series)
+  ) +
+    geom_col(
+      position = position_dodge(width = 0.82),
+      width = 0.72,
+      color = "grey25",
+      linewidth = 0.18
+    ) +
+    geom_errorbar(
+      aes(ymin = CI_Lower, ymax = CI_Upper),
+      position = position_dodge(width = 0.82),
+      width = 0.12,
+      linewidth = 0.5
+    ) +
+    geom_point(
+      data = plot_data %>% filter(Model == "Featureless"),
+      position = position_dodge(width = 0.82),
+      shape = 21,
+      size = 1.8,
+      stroke = 0.5,
+      color = "black"
+    ) +
+    geom_text(
+      data = marker_data,
+      aes(x = Category, y = Y, label = "*"),
+      inherit.aes = FALSE,
+      fontface = "bold",
+      size = 4
+    ) +
+    facet_wrap(~ Sample, ncol = 1, scales = "free_y") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
+    scale_fill_manual(values = c(
+      "Featureless Birth" = "#D9D9D9",
+      "Featureless Current" = "#969696",
+      "Domains Birth" = "#9ECAE1",
+      "Domains Current" = "#3182BD",
+      "Items Birth" = "#FDD0A2",
+      "Items Current" = "#E6550D"
+    )) +
+    labs(
+      title = title,
+      subtitle = paste0(
+        "BSS with corrected 95% CIs; featureless BSS = 0. ",
+        "* significant birth-current difference; settlement tests use ",
+        "Holm-adjusted p < .05."
+      ),
+      x = NULL,
+      y = "Brier Skill Score",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(angle = 25, hjust = 1),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+
+  ggsave(filename, plot, width = 12, height = 8, dpi = 300)
+  plot
+}
+
+p_bss_domains <- make_separate_bss_plot(
+  target_model = "Domains",
+  marker_label = "D*",
+  title = "Big Five Domain Prediction of Birth and Current Residence",
+  filename = "figure_bss_domains.png"
+)
+
+p_bss_items <- make_separate_bss_plot(
+  target_model = "Items",
+  marker_label = "I*",
+  title = "Personality Item Prediction of Birth and Current Residence",
+  filename = "figure_bss_items.png"
 )
 
 # =============================================================================
