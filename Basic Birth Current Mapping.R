@@ -153,10 +153,15 @@ significance_markers <- bind_rows(
 ) %>%
   filter(p_for_marker < 0.05) %>%
   mutate(
-    Marker = recode(
+    Predictor_Model = recode(
       Model,
-      "Big Five domains" = "Domains*",
-      "Personality items" = "Items*"
+      "Big Five domains" = "Big Five domains",
+      "Personality items" = "Personality items"
+    ),
+    Marker = case_when(
+      p_for_marker < 0.001 ~ "***",
+      p_for_marker < 0.01 ~ "**",
+      TRUE ~ "*"
     ),
     Category = factor(
       Category,
@@ -183,89 +188,6 @@ if (!is.finite(bss_range) || bss_range == 0) bss_range <- 0.02
 significance_markers <- significance_markers %>%
   mutate(Y = Top + Marker_Order * 0.06 * bss_range)
 
-p_bss <- ggplot(
-  bss_figure_data,
-  aes(x = Category, y = Mean_BSS, fill = Series)
-) +
-  geom_col(
-    position = position_dodge(width = 0.88),
-    width = 0.78,
-    color = "grey25",
-    linewidth = 0.18
-  ) +
-  geom_errorbar(
-    aes(ymin = CI_Lower, ymax = CI_Upper),
-    position = position_dodge(width = 0.88),
-    width = 0.12,
-    linewidth = 0.45
-  ) +
-  geom_text(
-    data = bss_figure_data %>% filter(Model != "Featureless"),
-    aes(
-      y = CI_Label_Y,
-      label = CI_Label,
-      group = Series,
-      vjust = CI_Label_VJust
-    ),
-    position = position_dodge(width = 0.88),
-    angle = 90,
-    size = 2.2,
-    lineheight = 0.9,
-    show.legend = FALSE
-  ) +
-  geom_point(
-    data = bss_figure_data %>% filter(Model == "Featureless"),
-    position = position_dodge(width = 0.88),
-    shape = 21,
-    size = 1.8,
-    stroke = 0.5,
-    color = "black"
-  ) +
-  geom_text(
-    data = significance_markers,
-    aes(x = Category, y = Y, label = Marker),
-    inherit.aes = FALSE,
-    fontface = "bold",
-    size = 3.5
-  ) +
-  facet_wrap(~ Sample, ncol = 1) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
-  scale_fill_manual(values = c(
-    "Featureless Birth" = "#D9D9D9",
-    "Featureless Current" = "#969696",
-    "Domains Birth" = "#9ECAE1",
-    "Domains Current" = "#3182BD",
-    "Items Birth" = "#FDD0A2",
-    "Items Current" = "#E6550D"
-  ), drop = FALSE) +
-  labs(
-    title = "Personality Prediction of Birth and Current Residence",
-    subtitle = paste0(
-      "Labels show BSS [95% CI]; featureless BSS = 0 with CI [0, 0]. ",
-      "Domains*/Items*: significant birth-current difference; ",
-      "settlement tests use Holm-adjusted p < .05."
-    ),
-    x = NULL,
-    y = "Brier Skill Score",
-    fill = NULL
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    panel.grid.major.x = element_blank(),
-    axis.text.x = element_text(angle = 25, hjust = 1),
-    strip.text = element_text(face = "bold"),
-    legend.position = "bottom",
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
-  )
-
-ggsave(
-  "figure_bss_overall_settlements.png",
-  p_bss,
-  width = 13,
-  height = 9,
-  dpi = 300
-)
 write.csv(
   bss_figure_data,
   "figure_bss_overall_settlements_data.csv",
@@ -274,12 +196,18 @@ write.csv(
 
 # Separate figures use independent scales so domain BSS values are not visually
 # compressed by the larger item-model values.
-make_separate_bss_plot <- function(target_model, marker_label, title, filename) {
+make_separate_bss_plot <- function(target_model, title, filename) {
   plot_data <- bss_figure_data %>%
-    filter(Model %in% c("Featureless", target_model)) %>%
+    filter(Model == target_model) %>%
     droplevels()
   marker_data <- significance_markers %>%
-    filter(Marker == marker_label)
+    filter(
+      Predictor_Model == if_else(
+        target_model == "Domains",
+        "Big Five domains",
+        "Personality items"
+      )
+    )
 
   local_range <- diff(range(
     c(plot_data$CI_Lower, plot_data$CI_Upper), na.rm = TRUE
@@ -311,7 +239,7 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
       width = 0.12, linewidth = 0.5
     ) +
     geom_text(
-      data = plot_data %>% filter(Model != "Featureless"),
+      data = plot_data,
       aes(
         y = CI_Label_Y,
         label = CI_Label,
@@ -319,15 +247,19 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
         vjust = CI_Label_VJust
       ),
       position = position_dodge(width = 0.82),
-      angle = 90,
-      size = 2.3,
+      angle = 0,
+      size = 2.5,
       lineheight = 0.9,
       show.legend = FALSE
     ) +
+    # The black horizontal tick at zero is the featureless BSS reference and is
+    # drawn at the base of each trained bar rather than as a separate bar.
     geom_point(
-      data = plot_data %>% filter(Model == "Featureless"),
+      data = plot_data,
+      aes(y = 0, group = Series),
       position = position_dodge(width = 0.82),
-      shape = 21, size = 1.8, stroke = 0.5, color = "black"
+      shape = 95, size = 5, color = "black",
+      show.legend = FALSE
     ) +
     geom_text(
       data = marker_data,
@@ -347,9 +279,9 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
     labs(
       title = title,
       subtitle = paste0(
-        "Labels show BSS [95% CI]; featureless BSS = 0 with CI [0, 0]. ",
-        "* significant birth-current difference; settlement tests use ",
-        "Holm-adjusted p < .05."
+        "Labels show BSS [95% CI]; black ticks show the featureless BSS = 0 ",
+        "on each trained bar. * p < .05, ** p < .01, *** p < .001; ",
+        "settlement p-values are Holm-adjusted."
       ),
       x = NULL, y = "Brier Skill Score", fill = NULL
     ) +
@@ -368,12 +300,12 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
 }
 
 p_bss_domains <- make_separate_bss_plot(
-  "Domains", "Domains*",
+  "Domains",
   "Big Five Domain Prediction of Birth and Current Residence",
   "figure_bss_domains.png"
 )
 p_bss_items <- make_separate_bss_plot(
-  "Items", "Items*",
+  "Items",
   "Personality Item Prediction of Birth and Current Residence",
   "figure_bss_items.png"
 )
@@ -386,12 +318,6 @@ panel_bss_data <- bind_rows(
     mutate(Predictor_Model = "Big Five domains"),
   bss_figure_data %>%
     filter(Model == "Items") %>%
-    mutate(Predictor_Model = "Personality items"),
-  bss_figure_data %>%
-    filter(Model == "Featureless") %>%
-    mutate(Predictor_Model = "Big Five domains"),
-  bss_figure_data %>%
-    filter(Model == "Featureless") %>%
     mutate(Predictor_Model = "Personality items")
 ) %>%
   mutate(
@@ -403,9 +329,6 @@ panel_bss_data <- bind_rows(
 
 panel_significance <- significance_markers %>%
   mutate(
-    Predictor_Model = if_else(
-      Marker == "Domains*", "Big Five domains", "Personality items"
-    ),
     Predictor_Model = factor(
       Predictor_Model,
       levels = c("Big Five domains", "Personality items")
@@ -456,7 +379,7 @@ p_bss_panels <- ggplot(
     width = 0.12, linewidth = 0.5
   ) +
   geom_text(
-    data = panel_bss_data %>% filter(Model != "Featureless"),
+    data = panel_bss_data,
     aes(
       y = CI_Label_Y,
       label = CI_Label,
@@ -464,15 +387,17 @@ p_bss_panels <- ggplot(
       vjust = CI_Label_VJust
     ),
     position = position_dodge(width = 0.82),
-    angle = 90,
-    size = 2.1,
+    angle = 0,
+    size = 2.3,
     lineheight = 0.9,
     show.legend = FALSE
   ) +
   geom_point(
-    data = panel_bss_data %>% filter(Model == "Featureless"),
+    data = panel_bss_data,
+    aes(y = 0, group = Series),
     position = position_dodge(width = 0.82),
-    shape = 21, size = 1.8, stroke = 0.5, color = "black"
+    shape = 95, size = 5, color = "black",
+    show.legend = FALSE
   ) +
   geom_text(
     data = panel_significance,
@@ -497,7 +422,8 @@ p_bss_panels <- ggplot(
     title = "Personality Prediction of Birth and Current Residence",
     subtitle = paste0(
       "Domain and item panels use separate y scales. Labels show BSS [95% CI]; ",
-      "featureless BSS = 0 with CI [0, 0]; * significant birth-current difference."
+      "black ticks show featureless BSS = 0 on each trained bar. ",
+      "* p < .05, ** p < .01, *** p < .001; settlement p-values are Holm-adjusted."
     ),
     x = NULL, y = "Brier Skill Score", fill = NULL
   ) +
