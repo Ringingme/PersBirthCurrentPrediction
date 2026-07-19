@@ -44,6 +44,9 @@ if (length(missing_settlement_columns)) {
 }
 
 location_levels <- c("Village", "Town", "City", "Abroad")
+heatmap_condition_levels <- unlist(lapply(location_levels, function(location) {
+  paste(location, c("Birth", "Current"), sep = "\n")
+}))
 
 # =============================================================================
 # FIGURE 1: OVERALL AND SETTLEMENT-SPECIFIC BSS
@@ -396,7 +399,10 @@ make_coefficient_heatmap <- function(sample_name, title, filename) {
       Predictor = factor(Predictor, levels = rev(heatmap_predictor_order)),
       Class = factor(Class, levels = location_levels),
       Outcome = factor(Outcome, levels = c("Birth", "Current")),
-      Condition = interaction(Outcome, Class, sep = "\n", lex.order = TRUE)
+      Condition = factor(
+        paste(Class, Outcome, sep = "\n"),
+        levels = heatmap_condition_levels
+      )
     )
 
   plot <- ggplot(
@@ -404,6 +410,11 @@ make_coefficient_heatmap <- function(sample_name, title, filename) {
     aes(x = Condition, y = Predictor, fill = Plot_Coefficient)
   ) +
     geom_tile(color = "white", linewidth = 0.25) +
+    geom_vline(
+      xintercept = c(2.5, 4.5, 6.5),
+      color = "grey45",
+      linewidth = 0.45
+    ) +
     facet_grid(
       rows = vars(Predictor_Set),
       scales = "free_y",
@@ -433,7 +444,7 @@ make_coefficient_heatmap <- function(sample_name, title, filename) {
     theme_minimal(base_size = 9) +
     theme(
       panel.grid = element_blank(),
-      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.x = element_text(angle = 0, hjust = 0.5),
       axis.text.y = element_text(size = 7),
       strip.text = element_text(face = "bold"),
       plot.title = element_text(face = "bold", hjust = 0.5),
