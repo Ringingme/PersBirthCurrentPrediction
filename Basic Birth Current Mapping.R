@@ -196,10 +196,31 @@ write.csv(
 
 # Separate figures use independent scales so domain BSS values are not visually
 # compressed by the larger item-model values.
-make_separate_bss_plot <- function(target_model, title, filename) {
+make_separate_bss_plot <- function(target_model, title, filename,
+                                   label_digits = 4,
+                                   flip_coordinates = FALSE) {
   plot_data <- bss_figure_data %>%
     filter(Model == target_model) %>%
-    droplevels()
+    droplevels() %>%
+    mutate(
+      CI_Label_Display = sprintf(
+        paste0("%.", label_digits, "f [%.", label_digits,
+               "f, %.", label_digits, "f]"),
+        Mean_BSS, CI_Lower, CI_Upper
+      ),
+      CI_Label_HJust_Display = if (flip_coordinates) {
+        if_else(Mean_BSS >= 0, -0.05, 1.05)
+      } else {
+        0.5
+      },
+      CI_Label_VJust_Display = if (flip_coordinates) 0.5 else CI_Label_VJust
+    )
+  featureless_overlay <- plot_data %>%
+    mutate(
+      Mean_BSS = 0,
+      CI_Lower = 0,
+      CI_Upper = 0
+    )
   marker_data <- significance_markers %>%
     filter(
       Predictor_Model == if_else(
@@ -229,6 +250,13 @@ make_separate_bss_plot <- function(target_model, title, filename) {
     plot_data,
     aes(x = Category, y = Mean_BSS, fill = Series)
   ) +
+    # Featureless and trained values share the exact same bar positions and
+    # colors. Since featureless BSS is zero, its bar has zero height.
+    geom_col(
+      data = featureless_overlay,
+      position = position_dodge(width = 0.82), width = 0.72,
+      color = "grey25", linewidth = 0.18
+    ) +
     geom_col(
       position = position_dodge(width = 0.82), width = 0.72,
       color = "grey25", linewidth = 0.18
@@ -242,9 +270,10 @@ make_separate_bss_plot <- function(target_model, title, filename) {
       data = plot_data,
       aes(
         y = CI_Label_Y,
-        label = CI_Label,
+        label = CI_Label_Display,
         group = Series,
-        vjust = CI_Label_VJust
+        hjust = CI_Label_HJust_Display,
+        vjust = CI_Label_VJust_Display
       ),
       position = position_dodge(width = 0.82),
       angle = 0,
@@ -252,18 +281,17 @@ make_separate_bss_plot <- function(target_model, title, filename) {
       lineheight = 0.9,
       show.legend = FALSE
     ) +
-    # The black horizontal tick at zero is the featureless BSS reference and is
-    # drawn at the base of each trained bar rather than as a separate bar.
+    # A same-color tick makes the zero-height featureless overlay visible.
     geom_point(
       data = plot_data,
-      aes(y = 0, group = Series),
+      aes(y = 0, group = Series, color = Series),
       position = position_dodge(width = 0.82),
-      shape = 95, size = 5, color = "black",
+      shape = 95, size = 5,
       show.legend = FALSE
     ) +
     geom_text(
       data = marker_data,
-      aes(x = Category, y = Y, label = "*"),
+      aes(x = Category, y = Y, label = Marker),
       inherit.aes = FALSE, fontface = "bold", size = 4
     ) +
     facet_wrap(~ Sample, ncol = 1, scales = "free_y") +
@@ -276,11 +304,18 @@ make_separate_bss_plot <- function(target_model, title, filename) {
       "Items Birth" = "#FDD0A2",
       "Items Current" = "#E6550D"
     )) +
+    scale_color_manual(values = c(
+      "Domains Birth" = "#9ECAE1",
+      "Domains Current" = "#3182BD",
+      "Items Birth" = "#FDD0A2",
+      "Items Current" = "#E6550D"
+    ), guide = "none") +
     labs(
       title = title,
       subtitle = paste0(
-        "Labels show BSS [95% CI]; black ticks show the featureless BSS = 0 ",
-        "on each trained bar. * p < .05, ** p < .01, *** p < .001; ",
+        "Labels show BSS [95% CI]; same-color ticks show the zero-height ",
+        "featureless BSS overlaid on each trained bar. ",
+        "* p < .05, ** p < .01, *** p < .001; ",
         "settlement p-values are Holm-adjusted."
       ),
       x = NULL, y = "Brier Skill Score", fill = NULL
@@ -295,19 +330,33 @@ make_separate_bss_plot <- function(target_model, title, filename) {
       plot.subtitle = element_text(hjust = 0.5)
     )
 
-  ggsave(filename, plot, width = 12, height = 8, dpi = 300)
+  if (flip_coordinates) {
+    plot <- plot + coord_flip()
+  }
+
+  ggsave(
+    filename,
+    plot,
+    width = if_else(flip_coordinates, 13, 12),
+    height = if_else(flip_coordinates, 9, 8),
+    dpi = 300
+  )
   plot
 }
 
 p_bss_domains <- make_separate_bss_plot(
   "Domains",
   "Big Five Domain Prediction of Birth and Current Residence",
-  "figure_bss_domains.png"
+  "figure_bss_domains.png",
+  label_digits = 4,
+  flip_coordinates = FALSE
 )
 p_bss_items <- make_separate_bss_plot(
   "Items",
   "Personality Item Prediction of Birth and Current Residence",
-  "figure_bss_items.png"
+  "figure_bss_items.png",
+  label_digits = 2,
+  flip_coordinates = TRUE
 )
 
 # One combined PNG with domains and items in separate rows. Free y scales retain
@@ -332,8 +381,7 @@ panel_significance <- significance_markers %>%
     Predictor_Model = factor(
       Predictor_Model,
       levels = c("Big Five domains", "Personality items")
-    ),
-    Marker = "*"
+    )
   ) %>%
   select(-Y, -Top, -Marker_Order) %>%
   left_join(
