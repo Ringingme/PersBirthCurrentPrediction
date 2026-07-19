@@ -31,8 +31,7 @@ if (any(vapply(required_files_data, nrow, integer(1)) == 0)) {
   stop("At least one required analysis output is empty")
 }
 required_settlement_columns <- c(
-  "Model", "Sample", "Outcome", "Repeat", "Fold", "Settlement", "BSS",
-  "Brier", "Baseline_Brier", "Training_Prevalence", "Test_Prevalence"
+  "Model", "Sample", "Outcome", "Repeat", "Fold", "Settlement", "BSS"
 )
 missing_settlement_columns <- setdiff(
   required_settlement_columns, names(settlement_bss_results)
@@ -196,85 +195,95 @@ write.csv(
   row.names = FALSE
 )
 
-# Separate figures use independent scales so domain BSS values are not visually
-# compressed by the larger item-model values.
-make_separate_bss_plot <- function(target_model, sample_name, title, filename,
-                                   label_digits = 4,
-                                   flip_coordinates = FALSE) {
+# Whole-sample and movers-only figures each combine domains and items. The
+# panels use independent y scales so the smaller domain BSS values remain clear.
+make_sample_bss_plot <- function(sample_name, title, filename) {
   plot_data <- bss_figure_data %>%
-    filter(Model == target_model, Sample == sample_name) %>%
-    droplevels() %>%
+    filter(Sample == sample_name) %>%
     mutate(
-      CI_Label_Display = sprintf(
-        paste0("%.", label_digits, "f [%.", label_digits,
-               "f, %.", label_digits, "f]"),
-        Mean_BSS, CI_Lower, CI_Upper
+      Predictor_Model = factor(
+        recode(
+          Model,
+          "Domains" = "Big Five domains",
+          "Items" = "Personality items"
+        ),
+        levels = c("Big Five domains", "Personality items")
       ),
-      CI_Label_HJust_Display = if (flip_coordinates) {
-        if_else(Mean_BSS >= 0, -0.05, 1.05)
-      } else {
-        0.5
-      },
-      CI_Label_VJust_Display = if (flip_coordinates) 0.5 else CI_Label_VJust
+      Display_Label = if_else(
+        Model == "Items",
+        sprintf("%.3f [%.3f, %.3f]", Mean_BSS, CI_Lower, CI_Upper),
+        sprintf("%.4f [%.4f, %.4f]", Mean_BSS, CI_Lower, CI_Upper)
+      ),
+      Label_Y = if_else(Mean_BSS >= 0, CI_Upper, CI_Lower),
+      Label_VJust = if_else(Mean_BSS >= 0, -0.15, 1.15)
     )
+
+  panel_ranges <- plot_data %>%
+    group_by(Predictor_Model) %>%
+    summarize(
+      Panel_Range = diff(range(c(CI_Lower, CI_Upper), na.rm = TRUE)),
+      Panel_Range = if_else(
+        is.finite(Panel_Range) & Panel_Range > 0,
+        Panel_Range,
+        0.01
+      ),
+      .groups = "drop"
+    )
+
   marker_data <- significance_markers %>%
-    filter(
-      Sample == sample_name,
-      Predictor_Model == if_else(
-        target_model == "Domains",
-        "Big Five domains",
-        "Personality items"
-      )
-    )
-
-  local_range <- diff(range(
-    c(plot_data$CI_Lower, plot_data$CI_Upper), na.rm = TRUE
-  ))
-  if (!is.finite(local_range) || local_range == 0) local_range <- 0.01
-
-  marker_data <- marker_data %>%
+    filter(Sample == sample_name) %>%
     select(-Y, -Top, -Marker_Order) %>%
     left_join(
       plot_data %>%
-        filter(Model != "Featureless") %>%
-        group_by(Sample, Category) %>%
-        summarize(Top = max(CI_Upper, Mean_BSS, na.rm = TRUE), .groups = "drop"),
-      by = c("Sample", "Category")
+        group_by(Predictor_Model, Sample, Category) %>%
+        summarize(
+          Top = max(CI_Upper, Mean_BSS, na.rm = TRUE),
+          .groups = "drop"
+        ),
+      by = c("Predictor_Model", "Sample", "Category")
     ) %>%
-    mutate(Y = Top + 0.06 * local_range)
+    left_join(panel_ranges, by = "Predictor_Model") %>%
+    mutate(Y = Top + 0.06 * Panel_Range)
 
   plot <- ggplot(
     plot_data,
     aes(x = Category, y = Mean_BSS, fill = Series)
   ) +
     geom_col(
-      position = position_dodge(width = 0.82), width = 0.72,
-      color = "grey25", linewidth = 0.18
+      position = position_dodge(width = 0.82),
+      width = 0.72,
+      color = "grey25",
+      linewidth = 0.18
     ) +
     geom_errorbar(
       aes(ymin = CI_Lower, ymax = CI_Upper),
       position = position_dodge(width = 0.82),
-      width = 0.12, linewidth = 0.5
+      width = 0.12,
+      linewidth = 0.5
     ) +
     geom_text(
-      data = plot_data,
       aes(
-        y = CI_Label_Y,
-        label = CI_Label_Display,
+        y = Label_Y,
+        label = Display_Label,
         group = Series,
-        hjust = CI_Label_HJust_Display,
-        vjust = CI_Label_VJust_Display
+        vjust = Label_VJust
       ),
       position = position_dodge(width = 0.82),
       angle = 0,
-      size = 2.5,
-      lineheight = 0.9,
+      size = 2.4,
       show.legend = FALSE
     ) +
     geom_text(
       data = marker_data,
       aes(x = Category, y = Y, label = Marker),
-      inherit.aes = FALSE, fontface = "bold", size = 4
+      inherit.aes = FALSE,
+      fontface = "bold",
+      size = 4
+    ) +
+    facet_grid(
+      rows = vars(Predictor_Model),
+      scales = "free_y",
+      space = "free_y"
     ) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
     scale_fill_manual(values = c(
@@ -286,12 +295,13 @@ make_separate_bss_plot <- function(target_model, sample_name, title, filename,
     labs(
       title = title,
       subtitle = paste0(
-        "Labels show trained-model BSS [95% CI]; BSS = 0 is the featureless ",
-        "reference. ",
+        "BSS = 0 is the featureless reference. ",
         "* p < .05, ** p < .01, *** p < .001; ",
         "settlement p-values are Holm-adjusted."
       ),
-      x = NULL, y = "Brier Skill Score", fill = NULL
+      x = NULL,
+      y = "Brier Skill Score",
+      fill = NULL
     ) +
     theme_minimal(base_size = 11) +
     theme(
@@ -303,399 +313,20 @@ make_separate_bss_plot <- function(target_model, sample_name, title, filename,
       plot.subtitle = element_text(hjust = 0.5)
     )
 
-  if (flip_coordinates) {
-    plot <- plot + coord_flip()
-  }
-
-  ggsave(
-    filename,
-    plot,
-    width = if_else(flip_coordinates, 13, 12),
-    height = if_else(flip_coordinates, 9, 8),
-    dpi = 300
-  )
+  ggsave(filename, plot, width = 13, height = 9, dpi = 300)
   plot
 }
 
-p_bss_domains <- make_separate_bss_plot(
-  "Domains",
+p_bss_whole_sample <- make_sample_bss_plot(
   "All participants",
-  "Big Five Domain Prediction: Whole Sample",
-  "figure_bss_domains_whole_sample.png",
-  label_digits = 4,
-  flip_coordinates = FALSE
+  "Personality Prediction of Birth and Current Residence: Whole Sample",
+  "figure_bss_whole_sample.png"
 )
-p_bss_domains_movers <- make_separate_bss_plot(
-  "Domains",
+
+p_bss_movers_only <- make_sample_bss_plot(
   "Movers only",
-  "Big Five Domain Prediction: Movers Only",
-  "figure_bss_domains_movers_only.png",
-  label_digits = 4,
-  flip_coordinates = FALSE
-)
-p_bss_items <- make_separate_bss_plot(
-  "Items",
-  "All participants",
-  "Personality Item Prediction: Whole Sample",
-  "figure_bss_items_whole_sample.png",
-  label_digits = 2,
-  flip_coordinates = TRUE
-)
-p_bss_items_movers <- make_separate_bss_plot(
-  "Items",
-  "Movers only",
-  "Personality Item Prediction: Movers Only",
-  "figure_bss_items_movers_only.png",
-  label_digits = 2,
-  flip_coordinates = TRUE
-)
-
-# ---- Settlement prevalence companion figures -------------------------------
-
-# Test-fold prevalence is already saved by the analysis. Predictor models use
-# the same outer splits, so average duplicate domain/item entries within split.
-settlement_prevalence_folds <- settlement_bss_results %>%
-  group_by(Sample, Outcome, Repeat, Fold, Settlement) %>%
-  summarize(Prevalence = mean(Test_Prevalence), .groups = "drop")
-
-non_abroad_prevalence_folds <- settlement_prevalence_folds %>%
-  filter(Settlement != "Abroad") %>%
-  group_by(Sample, Outcome, Repeat, Fold) %>%
-  summarize(Prevalence = sum(Prevalence), .groups = "drop") %>%
-  mutate(Settlement = "Overall excluding Abroad")
-
-prevalence_figure_data <- bind_rows(
-  settlement_prevalence_folds,
-  non_abroad_prevalence_folds
-) %>%
-  group_by(Sample, Outcome, Settlement) %>%
-  group_modify(~ corrected_mean_ci(.x$Prevalence) %>%
-                 rename(
-                   Mean_Prevalence = Mean_BSS,
-                   CI_Lower_Prevalence = CI_Lower,
-                   CI_Upper_Prevalence = CI_Upper
-                 )) %>%
-  ungroup() %>%
-  mutate(
-    Settlement = factor(
-      Settlement,
-      levels = c("Overall excluding Abroad", location_levels)
-    ),
-    Outcome = factor(Outcome, levels = c("Birth", "Current")),
-    Label = sprintf(
-      "%.1f%% [%.1f%%, %.1f%%]",
-      100 * Mean_Prevalence,
-      100 * CI_Lower_Prevalence,
-      100 * CI_Upper_Prevalence
-    )
-  )
-
-make_prevalence_plot <- function(sample_name, title, filename) {
-  plot_data <- prevalence_figure_data %>%
-    filter(Sample == sample_name) %>%
-    droplevels()
-
-  plot <- ggplot(
-    plot_data,
-    aes(x = Settlement, y = Mean_Prevalence, color = Outcome, group = Outcome)
-  ) +
-    geom_point(position = position_dodge(width = 0.45), size = 2.8) +
-    geom_errorbar(
-      aes(ymin = CI_Lower_Prevalence, ymax = CI_Upper_Prevalence),
-      position = position_dodge(width = 0.45),
-      width = 0.12,
-      linewidth = 0.55
-    ) +
-    geom_text(
-      aes(label = Label),
-      position = position_dodge(width = 0.45),
-      hjust = -0.08,
-      size = 2.8,
-      show.legend = FALSE
-    ) +
-    coord_flip(clip = "off") +
-    scale_y_continuous(
-      labels = scales::label_percent(accuracy = 1),
-      expand = expansion(mult = c(0.02, 0.30))
-    ) +
-    scale_color_manual(
-      values = c("Birth" = "#3182BD", "Current" = "#E6550D")
-    ) +
-    labs(
-      title = title,
-      subtitle = "Points show mean test-fold prevalence with corrected 95% CIs.",
-      x = NULL,
-      y = "Settlement prevalence",
-      color = NULL
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(
-      panel.grid.major.y = element_blank(),
-      legend.position = "bottom",
-      plot.title = element_text(face = "bold", hjust = 0.5),
-      plot.subtitle = element_text(hjust = 0.5),
-      plot.margin = margin(5.5, 80, 5.5, 5.5)
-    )
-
-  ggsave(filename, plot, width = 12, height = 7, dpi = 300)
-  plot
-}
-
-p_prevalence_whole <- make_prevalence_plot(
-  "All participants",
-  "Birth and Current Settlement Prevalence: Whole Sample",
-  "figure_settlement_prevalence_whole_sample.png"
-)
-p_prevalence_movers <- make_prevalence_plot(
-  "Movers only",
-  "Birth and Current Settlement Prevalence: Movers Only",
-  "figure_settlement_prevalence_movers_only.png"
-)
-
-write.csv(
-  prevalence_figure_data,
-  "figure_settlement_prevalence_data.csv",
-  row.names = FALSE
-)
-
-# ---- Trained versus featureless Brier-score comparison ---------------------
-
-# Unlike featureless BSS, featureless Brier scores are not fixed at zero and
-# provide a meaningful direct comparison with the trained model.
-settlement_brier_folds <- settlement_bss_results %>%
-  select(
-    Model, Sample, Outcome, Repeat, Fold, Settlement,
-    Trained = Brier, Featureless = Baseline_Brier
-  ) %>%
-  pivot_longer(
-    cols = c(Trained, Featureless),
-    names_to = "Prediction",
-    values_to = "Brier"
-  )
-
-non_abroad_brier_folds <- settlement_brier_folds %>%
-  filter(Settlement != "Abroad") %>%
-  group_by(Model, Sample, Outcome, Repeat, Fold, Prediction) %>%
-  summarize(Brier = mean(Brier), .groups = "drop") %>%
-  mutate(Settlement = "Overall excluding Abroad")
-
-brier_figure_data <- bind_rows(
-  settlement_brier_folds,
-  non_abroad_brier_folds
-) %>%
-  group_by(Model, Sample, Outcome, Settlement, Prediction) %>%
-  group_modify(~ corrected_mean_ci(.x$Brier) %>%
-                 rename(
-                   Mean_Brier = Mean_BSS,
-                   CI_Lower_Brier = CI_Lower,
-                   CI_Upper_Brier = CI_Upper
-                 )) %>%
-  ungroup() %>%
-  mutate(
-    Model = recode(
-      Model,
-      "Big Five domains" = "Big Five domains",
-      "Personality items" = "Personality items"
-    ),
-    Settlement = factor(
-      Settlement,
-      levels = c("Overall excluding Abroad", location_levels)
-    ),
-    Series = factor(
-      paste(Prediction, Outcome),
-      levels = c(
-        "Featureless Birth", "Trained Birth",
-        "Featureless Current", "Trained Current"
-      )
-    ),
-    Label = sprintf(
-      "%.3f [%.3f, %.3f]",
-      Mean_Brier, CI_Lower_Brier, CI_Upper_Brier
-    )
-  )
-
-p_brier <- ggplot(
-  brier_figure_data,
-  aes(x = Settlement, y = Mean_Brier, fill = Series)
-) +
-  geom_col(
-    position = position_dodge(width = 0.86),
-    width = 0.76,
-    color = "grey25",
-    linewidth = 0.18
-  ) +
-  geom_errorbar(
-    aes(ymin = CI_Lower_Brier, ymax = CI_Upper_Brier),
-    position = position_dodge(width = 0.86),
-    width = 0.12,
-    linewidth = 0.45
-  ) +
-  facet_grid(rows = vars(Model), cols = vars(Sample), scales = "free_y") +
-  scale_fill_manual(values = c(
-    "Featureless Birth" = "#BDD7E7",
-    "Trained Birth" = "#2171B5",
-    "Featureless Current" = "#FDD0A2",
-    "Trained Current" = "#D94801"
-  )) +
-  labs(
-    title = "Trained and Featureless Brier Scores",
-    subtitle = "Lower Brier scores indicate better probabilistic predictions; error bars are corrected 95% CIs.",
-    x = NULL,
-    y = "Brier score",
-    fill = NULL
-  ) +
-  theme_minimal(base_size = 10) +
-  theme(
-    panel.grid.major.x = element_blank(),
-    axis.text.x = element_text(angle = 30, hjust = 1),
-    strip.text = element_text(face = "bold"),
-    legend.position = "bottom",
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
-  )
-
-ggsave(
-  "figure_brier_trained_featureless.png",
-  p_brier,
-  width = 16,
-  height = 9,
-  dpi = 300
-)
-write.csv(
-  brier_figure_data,
-  "figure_brier_trained_featureless_data.csv",
-  row.names = FALSE
-)
-
-# One combined PNG with domains and items in separate rows. Free y scales retain
-# the visibility of the small domain scores while keeping a single figure file.
-panel_bss_data <- bind_rows(
-  bss_figure_data %>%
-    filter(Model == "Domains") %>%
-    mutate(Predictor_Model = "Big Five domains"),
-  bss_figure_data %>%
-    filter(Model == "Items") %>%
-    mutate(Predictor_Model = "Personality items")
-) %>%
-  mutate(
-    Predictor_Model = factor(
-      Predictor_Model,
-      levels = c("Big Five domains", "Personality items")
-    ),
-    # Keep domain precision, but show every item BSS and CI to two decimals.
-    Panel_CI_Label = if_else(
-      Predictor_Model == "Personality items",
-      sprintf("%.2f [%.2f, %.2f]", Mean_BSS, CI_Lower, CI_Upper),
-      sprintf("%.4f [%.4f, %.4f]", Mean_BSS, CI_Lower, CI_Upper)
-    )
-  )
-
-panel_significance <- significance_markers %>%
-  mutate(
-    Predictor_Model = factor(
-      Predictor_Model,
-      levels = c("Big Five domains", "Personality items")
-    )
-  ) %>%
-  select(-Y, -Top, -Marker_Order) %>%
-  left_join(
-    panel_bss_data %>%
-      filter(Model != "Featureless") %>%
-      group_by(Predictor_Model, Sample, Category) %>%
-      summarize(Top = max(CI_Upper, Mean_BSS, na.rm = TRUE), .groups = "drop"),
-    by = c("Predictor_Model", "Sample", "Category")
-  ) %>%
-  group_by(Predictor_Model) %>%
-  mutate(
-    Panel_Range = diff(range(
-      c(
-        panel_bss_data$CI_Lower[
-          panel_bss_data$Predictor_Model == first(Predictor_Model)
-        ],
-        panel_bss_data$CI_Upper[
-          panel_bss_data$Predictor_Model == first(Predictor_Model)
-        ]
-      ),
-      na.rm = TRUE
-    )),
-    Panel_Range = if_else(
-      is.finite(Panel_Range) & Panel_Range > 0,
-      Panel_Range,
-      0.01
-    ),
-    Y = Top + 0.06 * Panel_Range
-  ) %>%
-  ungroup()
-
-p_bss_panels <- ggplot(
-  panel_bss_data,
-  aes(x = Category, y = Mean_BSS, fill = Series)
-) +
-  geom_col(
-    position = position_dodge(width = 0.82), width = 0.72,
-    color = "grey25", linewidth = 0.18
-  ) +
-  geom_errorbar(
-    aes(ymin = CI_Lower, ymax = CI_Upper),
-    position = position_dodge(width = 0.82),
-    width = 0.12, linewidth = 0.5
-  ) +
-  geom_text(
-    data = panel_bss_data,
-    aes(
-      y = CI_Label_Y,
-      label = Panel_CI_Label,
-      group = Series,
-      vjust = CI_Label_VJust
-    ),
-    position = position_dodge(width = 0.82),
-    angle = 0,
-    size = 2.3,
-    lineheight = 0.9,
-    show.legend = FALSE
-  ) +
-  geom_text(
-    data = panel_significance,
-    aes(x = Category, y = Y, label = Marker),
-    inherit.aes = FALSE, fontface = "bold", size = 4
-  ) +
-  facet_grid(
-    rows = vars(Predictor_Model),
-    cols = vars(Sample),
-    scales = "free_y"
-  ) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
-  scale_fill_manual(values = c(
-    "Domains Birth" = "#9ECAE1",
-    "Domains Current" = "#3182BD",
-    "Items Birth" = "#FDD0A2",
-    "Items Current" = "#E6550D"
-  )) +
-  labs(
-    title = "Personality Prediction of Birth and Current Residence",
-    subtitle = paste0(
-      "Domain and item panels use separate y scales. Labels show BSS [95% CI]; ",
-      "BSS = 0 is the featureless reference. ",
-      "* p < .05, ** p < .01, *** p < .001; settlement p-values are Holm-adjusted."
-    ),
-    x = NULL, y = "Brier Skill Score", fill = NULL
-  ) +
-  theme_minimal(base_size = 10) +
-  theme(
-    panel.grid.major.x = element_blank(),
-    axis.text.x = element_text(angle = 30, hjust = 1),
-    strip.text = element_text(face = "bold"),
-    legend.position = "bottom",
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5)
-  )
-
-ggsave(
-  "figure_bss_domains_items_panels.png",
-  p_bss_panels,
-  width = 16,
-  height = 10,
-  dpi = 300
+  "Personality Prediction of Birth and Current Residence: Movers Only",
+  "figure_bss_movers_only.png"
 )
 
 # =============================================================================
@@ -819,5 +450,5 @@ write.csv(
 )
 
 message(
-  "Saved the BSS, prevalence, Brier-score, and coefficient figures."
+  "Saved two BSS figures and one coefficient heatmap."
 )
