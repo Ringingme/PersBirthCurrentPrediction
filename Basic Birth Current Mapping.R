@@ -63,7 +63,7 @@ non_abroad_macro_bss <- settlement_bss_results %>%
   filter(Settlement != "Abroad") %>%
   group_by(Model, Sample, Outcome, Repeat, Fold) %>%
   summarize(BSS = mean(BSS), .groups = "drop") %>%
-  mutate(Category = "Overall excl. Abroad (macro)")
+  mutate(Category = "Overall excluding Abroad")
 
 corrected_macro_test <- function(results, k = OUTER_FOLDS) {
   results %>%
@@ -113,7 +113,7 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
   mutate(
     Category = factor(
       Category,
-      levels = c("Overall excl. Abroad (macro)", location_levels)
+      levels = c("Overall excluding Abroad", location_levels)
     ),
     Model = recode(
       Model,
@@ -145,7 +145,7 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
 significance_markers <- bind_rows(
   non_abroad_macro_test %>%
     transmute(
-      Model, Sample, Category = "Overall excl. Abroad (macro)",
+      Model, Sample, Category = "Overall excluding Abroad",
       p_for_marker = p
     ),
   settlement_bss_tests %>%
@@ -165,7 +165,7 @@ significance_markers <- bind_rows(
     ),
     Category = factor(
       Category,
-      levels = c("Overall excl. Abroad (macro)", location_levels)
+      levels = c("Overall excluding Abroad", location_levels)
     )
   ) %>%
   left_join(
@@ -196,11 +196,11 @@ write.csv(
 
 # Separate figures use independent scales so domain BSS values are not visually
 # compressed by the larger item-model values.
-make_separate_bss_plot <- function(target_model, title, filename,
+make_separate_bss_plot <- function(target_model, sample_name, title, filename,
                                    label_digits = 4,
                                    flip_coordinates = FALSE) {
   plot_data <- bss_figure_data %>%
-    filter(Model == target_model) %>%
+    filter(Model == target_model, Sample == sample_name) %>%
     droplevels() %>%
     mutate(
       CI_Label_Display = sprintf(
@@ -223,6 +223,7 @@ make_separate_bss_plot <- function(target_model, title, filename,
     )
   marker_data <- significance_markers %>%
     filter(
+      Sample == sample_name,
       Predictor_Model == if_else(
         target_model == "Domains",
         "Big Five domains",
@@ -294,7 +295,6 @@ make_separate_bss_plot <- function(target_model, title, filename,
       aes(x = Category, y = Y, label = Marker),
       inherit.aes = FALSE, fontface = "bold", size = 4
     ) +
-    facet_wrap(~ Sample, ncol = 1, scales = "free_y") +
     geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
     scale_fill_manual(values = c(
       "Featureless Birth" = "#D9D9D9",
@@ -346,15 +346,33 @@ make_separate_bss_plot <- function(target_model, title, filename,
 
 p_bss_domains <- make_separate_bss_plot(
   "Domains",
-  "Big Five Domain Prediction of Birth and Current Residence",
-  "figure_bss_domains.png",
+  "All participants",
+  "Big Five Domain Prediction: Whole Sample",
+  "figure_bss_domains_whole_sample.png",
+  label_digits = 4,
+  flip_coordinates = FALSE
+)
+p_bss_domains_movers <- make_separate_bss_plot(
+  "Domains",
+  "Movers only",
+  "Big Five Domain Prediction: Movers Only",
+  "figure_bss_domains_movers_only.png",
   label_digits = 4,
   flip_coordinates = FALSE
 )
 p_bss_items <- make_separate_bss_plot(
   "Items",
-  "Personality Item Prediction of Birth and Current Residence",
-  "figure_bss_items.png",
+  "All participants",
+  "Personality Item Prediction: Whole Sample",
+  "figure_bss_items_whole_sample.png",
+  label_digits = 2,
+  flip_coordinates = TRUE
+)
+p_bss_items_movers <- make_separate_bss_plot(
+  "Items",
+  "Movers only",
+  "Personality Item Prediction: Movers Only",
+  "figure_bss_items_movers_only.png",
   label_digits = 2,
   flip_coordinates = TRUE
 )
