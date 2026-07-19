@@ -302,38 +302,8 @@ multiclass_metrics <- function(actual, probabilities, baseline) {
     mean(predicted[rows] == class_name)
   }, numeric(1))
 
-  # Sensitivity analysis excluding Abroad. Probabilities and training-fold
-  # featureless prevalences are renormalized over Village, Town, and City.
-  retained_classes <- setdiff(location_levels, "Abroad")
-  retained_rows <- actual != "Abroad"
-  retained_actual <- factor(
-    actual[retained_rows],
-    levels = retained_classes
-  )
-  retained_probabilities <- probabilities[
-    retained_rows, retained_classes, drop = FALSE
-  ]
-  retained_probabilities <- retained_probabilities /
-    rowSums(retained_probabilities)
-  retained_baseline <- as.numeric(baseline[retained_classes])
-  retained_baseline <- retained_baseline / sum(retained_baseline)
-  retained_observed <- model.matrix(~ retained_actual - 1)
-  colnames(retained_observed) <- retained_classes
-  retained_baseline_matrix <- matrix(
-    rep(retained_baseline, each = nrow(retained_observed)),
-    nrow = nrow(retained_observed)
-  )
-  retained_model_brier <- mean(rowSums(
-    (retained_probabilities - retained_observed)^2
-  ))
-  retained_baseline_brier <- mean(rowSums(
-    (retained_baseline_matrix - retained_observed)^2
-  ))
-
   c(
     BSS = 1 - model_brier / baseline_brier,
-    BSS_Excluding_Abroad =
-      1 - retained_model_brier / retained_baseline_brier,
     Brier = model_brier,
     LogLoss = -mean(log(pmax(
       probabilities[cbind(seq_along(actual), actual_index)], 1e-15
@@ -660,29 +630,6 @@ corrected_birth_current_test <- function(results, k) {
     )
 }
 
-corrected_birth_current_test_excluding_abroad <- function(results, k) {
-  results %>%
-    select(
-      Model, Sample, Repeat, Fold, Outcome,
-      BSS = BSS_Excluding_Abroad
-    ) %>%
-    pivot_wider(names_from = Outcome, values_from = BSS) %>%
-    mutate(Difference = Current - Birth) %>%
-    group_by(Model, Sample) %>%
-    summarize(
-      Birth_BSS = mean(Birth),
-      Current_BSS = mean(Current),
-      Current_minus_Birth = mean(Difference),
-      Corrected_SE = sqrt((1 / n() + 1 / (k - 1)) * var(Difference)),
-      df = n() - 1,
-      t = Current_minus_Birth / Corrected_SE,
-      p = 2 * pt(abs(t), df, lower.tail = FALSE),
-      CI_Lower = Current_minus_Birth - qt(0.975, df) * Corrected_SE,
-      CI_Upper = Current_minus_Birth + qt(0.975, df) * Corrected_SE,
-      .groups = "drop"
-    )
-}
-
 corrected_settlement_tests <- function(results, k) {
   tests <- results %>%
     select(Model, Sample, Settlement, Repeat, Fold, Outcome, BSS) %>%
@@ -760,23 +707,13 @@ stayer_coefficients <- bind_rows(lapply(stayer_runs, `[[`, "coefficients"))
 birth_current_summary <- birth_current_results %>%
   group_by(Model, Sample, Outcome) %>%
   summarize(
-    across(
-      c(
-        BSS, BSS_Excluding_Abroad, Brier, LogLoss,
-        Accuracy, BalancedAccuracy
-      ),
-      mean
-    ),
+    across(c(BSS, Brier, LogLoss, Accuracy, BalancedAccuracy), mean),
     .groups = "drop"
   )
 
 birth_current_test <- corrected_birth_current_test(
   birth_current_results, OUTER_FOLDS
 )
-birth_current_test_excluding_abroad <-
-  corrected_birth_current_test_excluding_abroad(
-    birth_current_results, OUTER_FOLDS
-  )
 settlement_bss_summary <- settlement_bss_results %>%
   group_by(Model, Sample, Outcome, Settlement) %>%
   summarize(
@@ -829,7 +766,6 @@ stayer_coefficient_summary <- summarize_coefficients(
 
 print(birth_current_summary)
 print(birth_current_test)
-print(birth_current_test_excluding_abroad)
 print(settlement_bss_summary)
 print(settlement_bss_tests)
 print(stayer_summary)
@@ -844,11 +780,6 @@ write.csv(
 )
 write.csv(
   birth_current_test, "basic_birth_current_corrected_test.csv", row.names = FALSE
-)
-write.csv(
-  birth_current_test_excluding_abroad,
-  "basic_birth_current_excluding_abroad_corrected_test.csv",
-  row.names = FALSE
 )
 write.csv(
   settlement_bss_results,

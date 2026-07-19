@@ -21,9 +21,6 @@ COEFFICIENT_COLOR_LIMIT <- 0.30
 birth_current_results <- read.csv("basic_birth_current_fold_results.csv")
 settlement_bss_results <- read.csv("basic_settlement_bss_fold_results.csv")
 birth_current_test <- read.csv("basic_birth_current_corrected_test.csv")
-birth_current_test_excluding_abroad <- read.csv(
-  "basic_birth_current_excluding_abroad_corrected_test.csv"
-)
 settlement_bss_tests <- read.csv("basic_settlement_bss_corrected_tests.csv")
 coefficient_summary <- read.csv("basic_birth_current_coefficient_summary.csv")
 
@@ -31,8 +28,6 @@ required_files_data <- list(
   birth_current_results = birth_current_results,
   settlement_bss_results = settlement_bss_results,
   birth_current_test = birth_current_test,
-  birth_current_test_excluding_abroad =
-    birth_current_test_excluding_abroad,
   settlement_bss_tests = settlement_bss_tests,
   coefficient_summary = coefficient_summary
 )
@@ -66,15 +61,46 @@ corrected_mean_ci <- function(scores, k = OUTER_FOLDS) {
   )
 }
 
+# This uses the already saved one-versus-rest settlement BSS values. It is a
+# macro-average of Village, Town, and City, not a refitted three-class BSS.
+non_abroad_macro_bss <- settlement_bss_results %>%
+  filter(Settlement != "Abroad") %>%
+  group_by(Model, Sample, Outcome, Repeat, Fold) %>%
+  summarize(BSS = mean(BSS), .groups = "drop") %>%
+  mutate(Category = "Macro mean excl. Abroad")
+
+corrected_macro_test <- function(results, k = OUTER_FOLDS) {
+  results %>%
+    select(Model, Sample, Repeat, Fold, Outcome, BSS) %>%
+    pivot_wider(names_from = Outcome, values_from = BSS) %>%
+    mutate(Difference = Current - Birth) %>%
+    group_by(Model, Sample) %>%
+    summarize(
+      Birth_BSS = mean(Birth),
+      Current_BSS = mean(Current),
+      Current_minus_Birth = mean(Difference),
+      Corrected_SE = sqrt((1 / n() + 1 / (k - 1)) * var(Difference)),
+      df = n() - 1,
+      t = Current_minus_Birth / Corrected_SE,
+      p = 2 * pt(abs(t), df, lower.tail = FALSE),
+      CI_Lower = Current_minus_Birth - qt(0.975, df) * Corrected_SE,
+      CI_Upper = Current_minus_Birth + qt(0.975, df) * Corrected_SE,
+      .groups = "drop"
+    )
+}
+
+non_abroad_macro_test <- corrected_macro_test(non_abroad_macro_bss)
+write.csv(
+  non_abroad_macro_test,
+  "figure_macro_bss_excluding_abroad_corrected_test.csv",
+  row.names = FALSE
+)
+
 trained_bss <- bind_rows(
   birth_current_results %>%
     transmute(Model, Sample, Outcome, Repeat, Fold, Category = "Overall", BSS),
-  birth_current_results %>%
-    transmute(
-      Model, Sample, Outcome, Repeat, Fold,
-      Category = "Overall excl. Abroad",
-      BSS = BSS_Excluding_Abroad
-    ),
+  non_abroad_macro_bss %>%
+    select(Model, Sample, Outcome, Repeat, Fold, Category, BSS),
   settlement_bss_results %>%
     transmute(Model, Sample, Outcome, Repeat, Fold,
               Category = Settlement, BSS)
@@ -93,7 +119,7 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
   mutate(
     Category = factor(
       Category,
-      levels = c("Overall", "Overall excl. Abroad", location_levels)
+      levels = c("Overall", "Macro mean excl. Abroad", location_levels)
     ),
     Model = recode(
       Model,
@@ -115,9 +141,9 @@ bss_figure_data <- bind_rows(trained_bss, featureless_bss) %>%
 significance_markers <- bind_rows(
   birth_current_test %>%
     transmute(Model, Sample, Category = "Overall", p_for_marker = p),
-  birth_current_test_excluding_abroad %>%
+  non_abroad_macro_test %>%
     transmute(
-      Model, Sample, Category = "Overall excl. Abroad",
+      Model, Sample, Category = "Macro mean excl. Abroad",
       p_for_marker = p
     ),
   settlement_bss_tests %>%
@@ -132,7 +158,7 @@ significance_markers <- bind_rows(
     ),
     Category = factor(
       Category,
-      levels = c("Overall", "Overall excl. Abroad", location_levels)
+      levels = c("Overall", "Macro mean excl. Abroad", location_levels)
     )
   ) %>%
   left_join(
@@ -230,19 +256,17 @@ write.csv(
   row.names = FALSE
 )
 
-# Separate domain and item figures use independent y-axis ranges so the much
-# smaller domain BSS values remain visible.
+# Separate figures use independent scales so domain BSS values are not visually
+# compressed by the larger item-model values.
 make_separate_bss_plot <- function(target_model, marker_label, title, filename) {
   plot_data <- bss_figure_data %>%
     filter(Model %in% c("Featureless", target_model)) %>%
     droplevels()
-
   marker_data <- significance_markers %>%
     filter(Marker == marker_label)
 
   local_range <- diff(range(
-    c(plot_data$CI_Lower, plot_data$CI_Upper),
-    na.rm = TRUE
+    c(plot_data$CI_Lower, plot_data$CI_Upper), na.rm = TRUE
   ))
   if (!is.finite(local_range) || local_range == 0) local_range <- 0.01
 
@@ -252,10 +276,7 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
       plot_data %>%
         filter(Model != "Featureless") %>%
         group_by(Sample, Category) %>%
-        summarize(
-          Top = max(CI_Upper, Mean_BSS, na.rm = TRUE),
-          .groups = "drop"
-        ),
+        summarize(Top = max(CI_Upper, Mean_BSS, na.rm = TRUE), .groups = "drop"),
       by = c("Sample", "Category")
     ) %>%
     mutate(Y = Top + 0.06 * local_range)
@@ -265,31 +286,23 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
     aes(x = Category, y = Mean_BSS, fill = Series)
   ) +
     geom_col(
-      position = position_dodge(width = 0.82),
-      width = 0.72,
-      color = "grey25",
-      linewidth = 0.18
+      position = position_dodge(width = 0.82), width = 0.72,
+      color = "grey25", linewidth = 0.18
     ) +
     geom_errorbar(
       aes(ymin = CI_Lower, ymax = CI_Upper),
       position = position_dodge(width = 0.82),
-      width = 0.12,
-      linewidth = 0.5
+      width = 0.12, linewidth = 0.5
     ) +
     geom_point(
       data = plot_data %>% filter(Model == "Featureless"),
       position = position_dodge(width = 0.82),
-      shape = 21,
-      size = 1.8,
-      stroke = 0.5,
-      color = "black"
+      shape = 21, size = 1.8, stroke = 0.5, color = "black"
     ) +
     geom_text(
       data = marker_data,
       aes(x = Category, y = Y, label = "*"),
-      inherit.aes = FALSE,
-      fontface = "bold",
-      size = 4
+      inherit.aes = FALSE, fontface = "bold", size = 4
     ) +
     facet_wrap(~ Sample, ncol = 1, scales = "free_y") +
     geom_hline(yintercept = 0, linetype = "dashed", color = "grey35") +
@@ -308,9 +321,7 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
         "* significant birth-current difference; settlement tests use ",
         "Holm-adjusted p < .05."
       ),
-      x = NULL,
-      y = "Brier Skill Score",
-      fill = NULL
+      x = NULL, y = "Brier Skill Score", fill = NULL
     ) +
     theme_minimal(base_size = 11) +
     theme(
@@ -327,17 +338,14 @@ make_separate_bss_plot <- function(target_model, marker_label, title, filename) 
 }
 
 p_bss_domains <- make_separate_bss_plot(
-  target_model = "Domains",
-  marker_label = "D*",
-  title = "Big Five Domain Prediction of Birth and Current Residence",
-  filename = "figure_bss_domains.png"
+  "Domains", "D*",
+  "Big Five Domain Prediction of Birth and Current Residence",
+  "figure_bss_domains.png"
 )
-
 p_bss_items <- make_separate_bss_plot(
-  target_model = "Items",
-  marker_label = "I*",
-  title = "Personality Item Prediction of Birth and Current Residence",
-  filename = "figure_bss_items.png"
+  "Items", "I*",
+  "Personality Item Prediction of Birth and Current Residence",
+  "figure_bss_items.png"
 )
 
 # =============================================================================
