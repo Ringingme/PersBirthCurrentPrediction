@@ -11,7 +11,7 @@ OUTER_FOLDS <- 5
 setwd(PROJECT_DIR)
 
 # Adjustable heatmap thresholds.
-ITEM_COEFFICIENT_THRESHOLD <- 0.01
+ITEM_COEFFICIENT_THRESHOLD <- 0.03
 ITEM_SELECTION_FREQUENCY_THRESHOLD <- 0.50
 ITEM_MIN_OCCURRENCES <- 3
 COEFFICIENT_COLOR_LIMIT <- 0.30
@@ -347,100 +347,127 @@ coefficient_heatmap_data <- coefficient_summary %>%
 
 selected_items_table <- coefficient_heatmap_data %>%
   filter(Predictor_Set == "Items") %>%
-  group_by(Predictor) %>%
+  group_by(Sample, Predictor) %>%
   summarize(
     Occurrences = sum(Passes_Item_Threshold),
     Maximum_Absolute_Coefficient = max(abs(Median_Coefficient)),
     .groups = "drop"
   ) %>%
   filter(Occurrences >= ITEM_MIN_OCCURRENCES) %>%
-  arrange(desc(Occurrences), desc(Maximum_Absolute_Coefficient))
+  arrange(Sample, desc(Occurrences), desc(Maximum_Absolute_Coefficient))
 
-selected_items <- selected_items_table$Predictor
-if (length(selected_items) == 0) {
-  warning(
-    "No items passed the heatmap thresholds; reduce one or more item thresholds"
+make_coefficient_heatmap <- function(sample_name, title, filename) {
+  selected_items <- selected_items_table %>%
+    filter(Sample == sample_name) %>%
+    pull(Predictor)
+
+  if (length(selected_items) == 0) {
+    warning(
+      "No items passed the heatmap thresholds for ", sample_name,
+      "; reduce one or more item thresholds"
+    )
+  }
+
+  domain_predictors <- coefficient_heatmap_data %>%
+    filter(Predictor_Set == "Domains", Sample == sample_name) %>%
+    distinct(Predictor) %>%
+    pull(Predictor)
+
+  heatmap_predictor_order <- c(domain_predictors, selected_items)
+
+  plot_data <- coefficient_heatmap_data %>%
+    filter(
+      Sample == sample_name,
+      Predictor_Set == "Domains" | Predictor %in% selected_items
+    ) %>%
+    mutate(
+      Plot_Coefficient = if_else(
+        Predictor_Set == "Items" & !Passes_Item_Threshold,
+        NA_real_,
+        Median_Coefficient
+      ),
+      Predictor_Set = factor(Predictor_Set, levels = c("Domains", "Items")),
+      Predictor = factor(Predictor, levels = rev(heatmap_predictor_order)),
+      Class = factor(Class, levels = location_levels),
+      Outcome = factor(Outcome, levels = c("Birth", "Current")),
+      Condition = interaction(Outcome, Class, sep = "\n", lex.order = TRUE)
+    )
+
+  plot <- ggplot(
+    plot_data,
+    aes(x = Condition, y = Predictor, fill = Plot_Coefficient)
+  ) +
+    geom_tile(color = "white", linewidth = 0.25) +
+    facet_grid(
+      rows = vars(Predictor_Set),
+      scales = "free_y",
+      space = "free_y",
+      drop = FALSE
+    ) +
+    scale_fill_gradient2(
+      low = "#3B4CC0",
+      mid = "white",
+      high = "#B40426",
+      midpoint = 0,
+      limits = c(-COEFFICIENT_COLOR_LIMIT, COEFFICIENT_COLOR_LIMIT),
+      oob = scales::squish,
+      na.value = "white",
+      name = "Median\ncoefficient"
+    ) +
+    labs(
+      title = title,
+      subtitle = paste0(
+        "Items: |median coefficient| >= ", ITEM_COEFFICIENT_THRESHOLD,
+        ", selection frequency >= ", ITEM_SELECTION_FREQUENCY_THRESHOLD,
+        ", in >= ", ITEM_MIN_OCCURRENCES, " cells within this sample"
+      ),
+      x = "Outcome and settlement type",
+      y = NULL
+    ) +
+    theme_minimal(base_size = 9) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 7),
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      legend.position = "right"
+    )
+
+  heatmap_height <- max(7, 4.5 + 0.20 * length(selected_items))
+  ggsave(
+    filename,
+    plot,
+    width = 12,
+    height = heatmap_height,
+    dpi = 300,
+    limitsize = FALSE
   )
+
+  list(plot = plot, data = plot_data)
 }
 
-domain_predictors <- coefficient_heatmap_data %>%
-  filter(Predictor_Set == "Domains") %>%
-  distinct(Predictor) %>%
-  pull(Predictor)
-
-heatmap_predictor_order <- c(domain_predictors, selected_items)
-
-coefficient_heatmap_filtered <- coefficient_heatmap_data %>%
-  filter(Predictor_Set == "Domains" | Predictor %in% selected_items) %>%
-  mutate(
-    Plot_Coefficient = if_else(
-      Predictor_Set == "Items" & !Passes_Item_Threshold,
-      NA_real_,
-      Median_Coefficient
-    ),
-    Predictor_Set = factor(Predictor_Set, levels = c("Domains", "Items")),
-    Predictor = factor(Predictor, levels = rev(heatmap_predictor_order)),
-    Class = factor(Class, levels = location_levels),
-    Outcome = factor(Outcome, levels = c("Birth", "Current")),
-    Condition = interaction(Outcome, Class, sep = "\n", lex.order = TRUE),
-    Sample = factor(Sample, levels = c("All participants", "Movers only"))
-  )
-
-p_coefficients <- ggplot(
-  coefficient_heatmap_filtered,
-  aes(x = Condition, y = Predictor, fill = Plot_Coefficient)
-) +
-  geom_tile(color = "white", linewidth = 0.25) +
-  facet_grid(
-    rows = vars(Predictor_Set),
-    cols = vars(Sample),
-    scales = "free_y",
-    space = "free_y",
-    drop = FALSE
-  ) +
-  scale_fill_gradient2(
-    low = "#3B4CC0",
-    mid = "white",
-    high = "#B40426",
-    midpoint = 0,
-    limits = c(-COEFFICIENT_COLOR_LIMIT, COEFFICIENT_COLOR_LIMIT),
-    oob = scales::squish,
-    na.value = "white",
-    name = "Median\ncoefficient"
-  ) +
-  labs(
-    title = "Personality Coefficients for Birth and Current Residence",
-    subtitle = paste0(
-      "Items: |median coefficient| >= ", ITEM_COEFFICIENT_THRESHOLD,
-      ", selection frequency >= ", ITEM_SELECTION_FREQUENCY_THRESHOLD,
-      ", in >= ", ITEM_MIN_OCCURRENCES, " cells"
-    ),
-    x = "Outcome and settlement type",
-    y = NULL
-  ) +
-  theme_minimal(base_size = 9) +
-  theme(
-    panel.grid = element_blank(),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    axis.text.y = element_text(size = 7),
-    strip.text = element_text(face = "bold"),
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5),
-    legend.position = "right"
-  )
-
-heatmap_height <- max(7, 4.5 + 0.20 * length(selected_items))
-ggsave(
-  "figure_coefficient_heatmap_domains_items.png",
-  p_coefficients,
-  width = 15,
-  height = heatmap_height,
-  dpi = 300,
-  limitsize = FALSE
+coefficient_heatmap_whole <- make_coefficient_heatmap(
+  "All participants",
+  "Personality Coefficients: Whole Sample",
+  "figure_coefficient_heatmap_whole_sample.png"
 )
+
+coefficient_heatmap_movers <- make_coefficient_heatmap(
+  "Movers only",
+  "Personality Coefficients: Movers Only",
+  "figure_coefficient_heatmap_movers_only.png"
+)
+
+coefficient_heatmap_filtered <- bind_rows(
+  coefficient_heatmap_whole$data,
+  coefficient_heatmap_movers$data
+)
+
 write.csv(
   coefficient_heatmap_filtered,
-  "figure_coefficient_heatmap_domains_items_data.csv",
+  "figure_coefficient_heatmap_data.csv",
   row.names = FALSE
 )
 write.csv(
@@ -450,5 +477,5 @@ write.csv(
 )
 
 message(
-  "Saved two BSS figures and one coefficient heatmap."
+  "Saved separate whole-sample and movers-only BSS and coefficient figures."
 )
